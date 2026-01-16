@@ -27,6 +27,7 @@ The plan should contain the following sections:
 - Description (brief description of the phase)
 - To-do list (checkboxes list of actions to complete the phase)
 - Verification (how to verify the phase is complete and correct)
+- Documentation to update once all phases are completed
 - Next step
 
 # Considerations for each plan section
@@ -37,6 +38,11 @@ The plan should contain the following sections:
 - We must be able to commit and push the code for each phase without breaking the build and the added code makes sense.
 - Read the AGENTS.md file and the relevant documentation referenced in that file to understand the architecture and the coding conventions to follow while proposing the plan.
 - Each phase is only completed once the verification step has been successfully passed. If not, we have to iterate the phase until it passes.
+
+## Documentation section
+
+- Once all phases are completed, we must update or create documentation related to what we have done.
+- To know how and what to document reference the `./documentation/how-to-document.md` file
 
 ## Next step section
 
