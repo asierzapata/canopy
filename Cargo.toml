@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "packages/server"]
+
 [package]
 name = "canopy"
 version = "0.1.0"
