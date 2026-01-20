@@ -47,3 +47,7 @@ The plan should contain the following sections:
 ## Next step section
 
 - Write it short and concise. It should be a single sentence that summarizes the next step to be taken to complete the task. That is, which phase should be completed next.
+
+# User Input
+
+$ARGUMENTS

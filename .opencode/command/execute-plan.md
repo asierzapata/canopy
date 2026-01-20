@@ -10,3 +10,7 @@ IMPORTANT: Perform only the actions of the current phase.
 2. Execute the actions of the current phase.
 3. Check the checkboxes of the current phase to-do list that have been completed.
 4. Update the plan next step section with the next phase to be completed.
+
+# User Input
+
+$ARGUMENTS
