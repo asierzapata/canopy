@@ -2529,29 +2529,122 @@ export class FeatureDO {
 }
 ```
 
-### Cloudflare Sandboxes Clarification
+### Cloudflare Sandboxes - GAME CHANGER! 🚀
 
-**Important**: There are different "Cloudflare sandboxes":
+**MAJOR UPDATE**: Cloudflare launched **Cloudflare Sandboxes** ([sandbox.cloudflare.com](https://sandbox.cloudflare.com/)) which CAN run OpenCode!
 
-#### 1. Cloudflare Browser Rendering (NOT suitable)
-- Headless Chrome for web automation
-- Good for: Screenshots, PDF generation, visual testing
-- **Bad for**: Running OpenCode, git, npm, etc.
-- **Verdict**: Can't use for agent execution
+#### What is Cloudflare Sandboxes?
 
-#### 2. Cloudflare Workers for Platforms (Potentially suitable)
-- Let you run user's code in Workers
-- V8 isolates (JavaScript/WASM only)
-- **Limitation**: Can't run native binaries (git, node, python)
-- **Verdict**: Not suitable for full dev environment
+Announced mid-2025, Cloudflare Sandboxes provide container-based execution environments on Cloudflare's edge network.
 
-#### 3. Third-party on Cloudflare (Best option)
-- Use E2B/Modal for sandboxes
-- Cloudflare for API/state/real-time
-- Keep them separate
-- **Verdict**: This is the way (and what we recommend)
+**Key Capabilities**:
+- ✅ Run Python and Node.js applications
+- ✅ Execute arbitrary processes and commands
+- ✅ Clone Git repositories directly
+- ✅ Full file system access (read/write)
+- ✅ Run background processes
+- ✅ Expose HTTP services with automatic preview URLs
+- ✅ Built specifically for AI agents and code execution
 
-**Conclusion**: Cloudflare doesn't have suitable sandboxes for OpenCode. Must use E2B/Modal/self-hosted.
+**Example Usage**:
+```typescript
+import { Sandbox } from '@cloudflare/sandbox';
+
+const sandbox = await Sandbox.create();
+
+// Clone repository
+await sandbox.git.clone('https://github.com/org/repo.git');
+
+// Install dependencies
+await sandbox.process.run('npm install');
+
+// Start OpenCode server
+const opencode = await sandbox.process.run(
+  'opencode server --port 8080',
+  { background: true }
+);
+
+// Get preview URL (automatically generated)
+const previewUrl = await sandbox.http.expose(8080);
+// Returns: https://<random>.preview.cloudflare.dev
+```
+
+**Perfect for Canopy Use Cases**:
+- AI agents and code assistants ✅
+- CI/CD runners ✅
+- Cloud REPLs ✅
+- Developer tools ✅
+
+#### Cloudflare Sandboxes vs E2B/Modal
+
+| Feature | Cloudflare Sandboxes | E2B | Modal |
+|---------|---------------------|-----|-------|
+| **Run OpenCode** | ✅ Yes (Node.js) | ✅ Yes | ✅ Yes |
+| **Git operations** | ✅ Built-in | ✅ Yes | ✅ Yes |
+| **File system** | ✅ Full access | ✅ Full access | ✅ Full access |
+| **HTTP preview URLs** | ✅ Automatic | ⚠️ Manual setup | ⚠️ Manual |
+| **CF integration** | ⭐⭐⭐⭐⭐ Native | ⭐⭐⭐ REST API | ⭐⭐⭐ REST API |
+| **Cold start** | ⭐⭐⭐⭐ Fast | ⭐⭐⭐⭐⭐ Very fast | ⭐⭐⭐⭐ Fast |
+| **Pricing** | 🆕 TBD (beta) | ⭐⭐⭐⭐ $0.10/hr | ⭐⭐⭐⭐ Similar |
+| **Maturity** | ⚠️ Beta (2025) | ✅ Production | ✅ Production |
+| **Python support** | ✅ Yes | ✅ Yes | ⭐⭐⭐⭐⭐ Excellent |
+| **Edge distribution** | ✅ Global | ⚠️ Few regions | ⚠️ Few regions |
+| **Single vendor** | ✅ All Cloudflare | ❌ Separate | ❌ Separate |
+
+#### Recommendation: Try Cloudflare Sandboxes First
+
+**Why Start with Cloudflare Sandboxes**:
+1. ✅ **All-Cloudflare stack** (except MongoDB)
+   - Workers → Durable Objects → Sandboxes (seamless)
+   - No external API calls needed
+2. ✅ **Single vendor** (simpler billing, support, auth)
+3. ✅ **Native integration** (same auth, same env vars)
+4. ✅ **Edge execution** (sandboxes run near users globally)
+5. ✅ **Built for AI agents** (exact use case)
+6. ✅ **Preview URLs** (automatic HTTP exposure)
+
+**Fallback to E2B/Modal if**:
+- Cloudflare Sandboxes still too beta/unstable
+- Need production SLA guarantees
+- Pricing becomes unfavorable when announced
+- Need features Cloudflare doesn't support yet
+- Want to avoid vendor lock-in
+
+**NEW Architecture with Cloudflare Sandboxes**:
+```
+Cloudflare Workers (API Gateway)
+        ↓
+Cloudflare Durable Objects (Feature state per feature)
+        ↓
+Cloudflare Sandboxes (OpenCode execution) ← GAME CHANGER!
+        ↓
+Cloudflare R2 (Artifacts storage)
+
++ MongoDB Atlas (Global data: users, teams, archive)
+```
+
+**This is the cleanest possible architecture!** All Cloudflare (except MongoDB for global data).
+
+#### Other Cloudflare Products (Clarification)
+
+For completeness, here are the other "sandbox" products:
+
+1. **Cloudflare Browser Rendering** (Different use case)
+   - Headless Chrome for web automation
+   - Good for: Screenshots, PDF generation, visual testing
+   - **Not for**: Running OpenCode, git, npm
+   - Use for: Visual verification in Canopy
+
+2. **Cloudflare Workers for Platforms** (Different use case)
+   - V8 isolates for user-submitted JavaScript
+   - Good for: Running untrusted JS/WASM
+   - **Not for**: Full dev environment, native binaries
+   - Use for: User scripts, plugins
+
+3. **Cloudflare Sandboxes** ⭐ (OUR CHOICE!)
+   - Container-based, full Linux environment
+   - Perfect for: OpenCode, git, npm, any toolchain
+   - Use for: Agent execution in Canopy
 
 ### Why Hybrid (Cloudflare + E2B/Modal)?
 
@@ -2969,6 +3062,245 @@ Try to run everything on Cloudflare Workers
    - Durable Objects mental model different
    - Event-driven, not request-response
    - **Mitigation**: Good documentation, examples
+
+### Data Architecture: Durable Objects + MongoDB
+
+**Important Clarification**: Durable Objects and MongoDB serve different purposes in Canopy's architecture.
+
+#### Data Separation Strategy
+
+```
+┌─────────────────────────────────────────────────────┐
+│         Durable Objects (SQLite per Feature)        │
+│              TRANSIENT / REAL-TIME DATA             │
+│                                                      │
+│  What lives here:                                    │
+│  ✅ Active feature sessions                         │
+│  ✅ Real-time chat messages (team collaboration)    │
+│  ✅ Collaborative notes (live editing)              │
+│  ✅ Feature context (learnings, decisions)          │
+│  ✅ Session events (agent activity)                 │
+│  ✅ WebSocket connections                           │
+│  ✅ Prompt queue                                    │
+│                                                      │
+│  Characteristics:                                    │
+│  - Lives in memory + SQLite                         │
+│  - Fast (edge-local)                                │
+│  - Ephemeral (can be recreated)                     │
+│  - Per-feature isolation                            │
+│  - Perfect for real-time collaboration              │
+└─────────────────────────────────────────────────────┘
+                        │
+                        │ (on feature completion
+                        │  or periodic sync)
+                        ↓
+┌─────────────────────────────────────────────────────┐
+│              MongoDB Atlas                           │
+│         PERSISTENT / GLOBAL DATA                    │
+│                                                      │
+│  What lives here:                                    │
+│  ✅ Users (profiles, settings, stats)               │
+│  ✅ Teams (members, permissions, quotas)            │
+│  ✅ Feature metadata (all features ever created)    │
+│  ✅ Feature archive (completed features)            │
+│  ✅ Session archive (all sessions history)          │
+│  ✅ Analytics (metrics, trends, usage)              │
+│  ✅ Search index (full-text across all data)        │
+│  ✅ Audit logs (compliance, debugging)              │
+│                                                      │
+│  Characteristics:                                    │
+│  - Persistent (never lost)                          │
+│  - Queryable (complex searches)                     │
+│  - Cross-feature queries                            │
+│  - Historical data                                  │
+│  - Perfect for analytics & search                   │
+└─────────────────────────────────────────────────────┘
+```
+
+#### Why This Split?
+
+**Durable Objects for Active Work** (Real-time):
+- Team is actively collaborating on a feature
+- Need instant updates (WebSocket broadcasting)
+- Data changes frequently (chat, agent outputs)
+- Each feature isolated (one DO per feature)
+- Queries are simple (single feature's data)
+
+**MongoDB for Everything Else** (Persistent):
+- Feature completed (archive for history)
+- Cross-feature analytics ("show me all OAuth features")
+- User/team management (global data)
+- Search ("find all features related to authentication")
+- Long-term storage (don't lose data if DO restarts)
+
+#### Example Data Flow
+
+```typescript
+// 1. User creates feature → MongoDB + DO
+await mongodb.features.insertOne({
+  _id: featureId,
+  teamId: teamId,
+  title: "Add OAuth",
+  status: "active",
+  createdAt: new Date()
+});
+
+const featureDO = env.FEATURES.get(
+  env.FEATURES.idFromName(featureId)
+);
+await featureDO.initialize();
+
+// 2. Team collaborates → DO (real-time)
+await featureDO.addChatMessage({
+  userId: "alice",
+  content: "Let's start with session 1"
+});
+// Instantly broadcast to all connected users via WebSocket
+
+// 3. Agent discovers learning → DO first
+await featureDO.addLearning({
+  content: "Auth middleware needs X-API-Key header",
+  fromSession: "session-1",
+  importance: "high"
+});
+// Visible immediately to all sessions in feature
+
+// 4. Feature completes → Export to MongoDB
+const doData = await featureDO.exportData();
+await mongodb.features.updateOne(
+  { _id: featureId },
+  {
+    $set: {
+      status: "completed",
+      completedAt: new Date(),
+      sessions: doData.sessions,
+      context: doData.context,
+      chatHistory: doData.chatMessages,
+      metrics: doData.metrics
+    }
+  }
+);
+
+// 5. DO can be cleaned up (data safe in MongoDB)
+await featureDO.archive();
+```
+
+#### Data Lifecycle
+
+```
+Feature Created
+      ↓
+MongoDB: Store feature metadata (title, team, status)
+Durable Object: Create feature DO, initialize SQLite
+      ↓
+Active Development (hours/days)
+      ↓
+Durable Object: All real-time activity
+  - Chat messages
+  - Session events
+  - Context updates
+  - Notes editing
+      ↓
+Feature Completed
+      ↓
+Export DO data → MongoDB
+Archive completed feature
+Clean up DO (optional, can keep for quick access)
+      ↓
+MongoDB: Permanent storage
+  - Full feature history
+  - Searchable
+  - Analytics
+```
+
+#### Querying Patterns
+
+**Real-time (Active Feature)**:
+```typescript
+// Query within Durable Object (fast, local)
+const featureDO = env.FEATURES.get(id);
+
+// Get all sessions
+const sessions = await featureDO.db.exec(`
+  SELECT * FROM sessions WHERE feature_id = ?
+`, featureId);
+
+// Get recent chat
+const chat = await featureDO.db.exec(`
+  SELECT * FROM chat_messages
+  ORDER BY created_at DESC
+  LIMIT 50
+`);
+```
+
+**Historical/Global (MongoDB)**:
+```javascript
+// Query across all features (complex, but possible)
+const features = await mongodb.features.find({
+  teamId: teamId,
+  status: "completed",
+  "sessions.merged": true
+}).toArray();
+
+// Analytics
+const stats = await mongodb.features.aggregate([
+  { $match: { teamId: teamId } },
+  { $group: {
+      _id: null,
+      totalFeatures: { $sum: 1 },
+      avgSessions: { $avg: { $size: "$sessions" } },
+      successRate: { $avg: "$metrics.successRate" }
+    }
+  }
+]);
+
+// Full-text search
+const results = await mongodb.features.find({
+  $text: { $search: "authentication oauth" }
+}).toArray();
+```
+
+#### Best Practices
+
+1. **Active Features → Durable Objects**
+   - Keep in DO while team is working
+   - Fast access, real-time updates
+   - Don't query MongoDB for active work
+
+2. **Completed Features → MongoDB**
+   - Export when done
+   - Optionally keep DO for quick re-open
+   - MongoDB is source of truth for history
+
+3. **Global Queries → MongoDB Only**
+   - Never query across multiple DOs
+   - Use MongoDB for analytics, search, reports
+   - DOs are isolated (that's the point!)
+
+4. **Sync Strategy**:
+   - **Option A**: Sync on completion only (simpler)
+   - **Option B**: Periodic sync every hour (safer)
+   - **Option C**: Event-driven sync (on major changes)
+
+5. **Data Retention**:
+   - DOs: Keep active features only (7-30 days)
+   - MongoDB: Keep everything forever (or per policy)
+   - R2: Keep artifacts (code snapshots, screenshots)
+
+#### Cost Implications
+
+**Durable Objects**:
+- $0.15 per million requests
+- $0.20 per GB-month storage
+- Minimal for real-time work
+- **Estimated**: $5-15/month for 100 active features
+
+**MongoDB**:
+- M10 tier: $60/month (10GB)
+- Grows with historical data
+- **Estimated**: $60-120/month depending on retention
+
+**Total**: ~$65-135/month for data layer
 
 ### MongoDB vs PostgreSQL for Canopy
 
@@ -3981,9 +4313,9 @@ By end of 2 months: Working prototype with feature-based grouping, shared contex
 
 ## Final Architecture Summary (Incorporating Your Insights)
 
-### The Winning Architecture: Cloudflare + MongoDB + E2B
+### The Winning Architecture: All Cloudflare + MongoDB
 
-Based on your excellent insights about Durable Objects and MongoDB:
+Based on your excellent insights about Durable Objects, MongoDB, and Cloudflare Sandboxes:
 
 ```
 ┌────────────────────────────────────────────────────┐
@@ -4023,20 +4355,23 @@ Based on your excellent insights about Durable Objects and MongoDB:
                         ↓
          ┌──────────────┴──────────────┐
          ↓                              ↓
-┌─────────────────┐          ┌──────────────────────┐
-│  E2B/Modal      │          │  MongoDB Atlas       │
-│  Sandboxes      │          │                      │
-│                 │          │  Collections:        │
-│  ┌───────────┐  │          │  ├─ features         │
-│  │ Session 1 │  │          │  ├─ users            │
-│  │ OpenCode  │  │          │  ├─ teams            │
-│  └───────────┘  │          │  ├─ analytics        │
-│  ┌───────────┐  │          │  └─ search_index    │
-│  │ Session 2 │  │          │                      │
-│  │ OpenCode  │  │          │  (Feature archive    │
-│  └───────────┘  │          │   when completed)    │
-│       ...       │          │                      │
-└─────────────────┘          └──────────────────────┘
+┌──────────────────────┐      ┌──────────────────────┐
+│ Cloudflare Sandboxes │      │  MongoDB Atlas       │
+│   (NEW! 2025)        │      │                      │
+│                      │      │  Collections:        │
+│  ┌────────────────┐  │      │  ├─ features         │
+│  │ Sandbox 1      │  │      │  ├─ users            │
+│  │ - OpenCode     │  │      │  ├─ teams            │
+│  │ - Git clone    │  │      │  ├─ analytics        │
+│  │ - npm install  │  │      │  └─ search_index    │
+│  │ - Preview URL  │  │      │                      │
+│  └────────────────┘  │      │  (Feature archive    │
+│  ┌────────────────┐  │      │   when completed)    │
+│  │ Sandbox 2      │  │      │                      │
+│  │ - OpenCode...  │  │      │  Transient → Persist │
+│  └────────────────┘  │      │  DO data archived    │
+│       ...            │      │   here on completion │
+└──────────────────────┘      └──────────────────────┘
          ↓
 ┌─────────────────┐
 │  Cloudflare R2  │
@@ -4062,10 +4397,13 @@ Based on your excellent insights about Durable Objects and MongoDB:
 - ✅ Great for unstructured agent outputs
 - ✅ Cheaper than vendor-specific DBs
 
-**3. E2B/Modal for Sandboxes (Unavoidable)**:
-- ❌ Cloudflare sandboxes don't support OpenCode
-- ✅ E2B/Modal purpose-built for code execution
-- ✅ Proven at scale
+**3. Cloudflare Sandboxes for OpenCode (Your Discovery!)**:
+- ✅ Announced mid-2025, perfect timing
+- ✅ Can run OpenCode, git, npm - full environment
+- ✅ Native Cloudflare integration (same vendor)
+- ✅ Automatic preview URLs for HTTP services
+- ✅ Edge-distributed (low latency globally)
+- ⚠️ Still beta (fallback to E2B/Modal if needed)
 
 ### Complete Tech Stack
 
@@ -4075,10 +4413,11 @@ Based on your excellent insights about Durable Objects and MongoDB:
 | **API** | Cloudflare Workers | Serverless, edge |
 | **Feature State** | Durable Objects (SQLite) | ONE per feature, real-time |
 | **Global Data** | MongoDB Atlas | Flexible schema, search |
-| **Sandboxes** | E2B or Modal | Only option for OpenCode |
+| **Sandboxes** | Cloudflare Sandboxes ⭐ | Run OpenCode, git, npm (NEW!) |
 | **Storage** | Cloudflare R2 | S3-compatible, cheap |
 | **Real-time** | Agents SDK | WebSocket Hibernation |
 | **Auth** | GitHub OAuth | User attribution |
+| **Fallback Sandbox** | E2B or Modal | If CF Sandboxes too beta |
 
 ### Data Flow
 
@@ -4087,10 +4426,10 @@ Based on your excellent insights about Durable Objects and MongoDB:
 
 2. User creates session →
    ├─ Recorded in Feature DO's SQLite
-   └─ E2B sandbox spawned for OpenCode
+   └─ Cloudflare Sandbox spawned for OpenCode
 
 3. User sends prompt →
-   ├─ Forwarded to OpenCode in sandbox
+   ├─ Forwarded to OpenCode in Cloudflare Sandbox
    └─ Broadcast to all WebSocket clients (team members)
 
 4. Agent discovers learning →
@@ -4117,9 +4456,15 @@ Based on your excellent insights about Durable Objects and MongoDB:
 | Cloudflare Workers | $5 | Mostly free tier |
 | Cloudflare Durable Objects | $15 | 100 DOs, light usage |
 | MongoDB Atlas | $60 | M10 tier (10GB) |
-| E2B Sandboxes | $1000 | Assuming 4hr avg |
+| Cloudflare Sandboxes | **TBD** 🆕 | Beta pricing not announced yet |
 | Cloudflare R2 | $5 | 100GB storage |
-| **Total** | **$1085/month** | ~$2.17 per session |
+| **Total (excluding sandboxes)** | **$85/month** | Plus sandbox costs |
+
+**Notes**:
+- Cloudflare Sandboxes pricing not yet announced (beta)
+- Likely to be competitive with E2B/Modal (~$1000/month for this usage)
+- **All-Cloudflare stack** = single invoice, unified support
+- **Fallback**: E2B would be ~$1000/month (total $1085)
 
 ### What You Get
 
@@ -4138,10 +4483,11 @@ Based on your excellent insights about Durable Objects and MongoDB:
 - [x] Edge-native (low latency)
 
 **Production Ready**:
-- [x] Auto-scaling (Cloudflare + E2B)
-- [x] Global distribution
-- [x] Built-in monitoring
-- [x] Cost-efficient
+- [x] Auto-scaling (all Cloudflare stack)
+- [x] Global distribution (edge-native)
+- [x] Built-in monitoring (Cloudflare dashboard)
+- [x] Cost-efficient (single vendor)
+- [x] Unified auth & billing
 
 ### What Makes This Different from Other Solutions
 
@@ -4151,9 +4497,10 @@ Based on your excellent insights about Durable Objects and MongoDB:
 | Cross-session context | ❌ | ❌ | ✅ Automatic |
 | Team chat | ❌ | ❌ | ✅ Built-in |
 | Collaborative notes | ❌ | ❌ | ✅ Built-in |
-| Sandboxed | ❌ Local | ✅ Cloud | ✅ Cloud |
+| Sandboxed | ❌ Local | ✅ Cloud | ✅ Cloud (Edge) |
 | Concurrent sessions | ⚠️ Limited | ⚠️ Limited | ✅ Unlimited |
-| Works from anywhere | ❌ | ⚠️ Partial | ✅ Yes |
+| Works from anywhere | ❌ | ⚠️ Partial | ✅ Yes (Slack, web, mobile) |
+| Infrastructure | Local setup | GitHub-hosted | ✅ All Cloudflare (unified) |
 
 ---
 
@@ -4171,11 +4518,12 @@ Based on your excellent insights about Durable Objects and MongoDB:
 4. Connect them together
 5. Test: Create feature → Add session → Query context
 
-### Week 2: E2B Integration
-1. Set up E2B account
-2. Build OpenCode container
-3. Connect Feature DO → E2B sandbox
+### Week 2: Cloudflare Sandboxes Integration
+1. Try Cloudflare Sandboxes SDK (@cloudflare/sandbox)
+2. Test: Spawn sandbox → Clone repo → Run OpenCode
+3. Connect Feature DO → Cloudflare Sandbox
 4. Test: Send prompt → OpenCode executes → Response back
+5. **Fallback**: If CF Sandboxes too beta, use E2B/Modal instead
 
 ### Week 3: Real Feature
 1. Implement full Feature DO schema
