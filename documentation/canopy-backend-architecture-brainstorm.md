@@ -2175,11 +2175,1164 @@ az container create \
 
 ---
 
+## Cloudflare-Native Architecture
+
+### Why Consider Cloudflare?
+
+Cloudflare offers a complete edge-native stack that could power Canopy entirely:
+
+**Key Technologies**:
+1. **Cloudflare Durable Objects**: Stateful, low-latency storage (Ramp uses this)
+2. **Cloudflare Workers**: Serverless compute at the edge
+3. **Cloudflare Browser Rendering**: Headless browser sandboxes
+4. **Cloudflare Agents SDK**: Real-time WebSocket management
+5. **Cloudflare R2**: S3-compatible object storage
+6. **Cloudflare D1**: SQLite at the edge
+
+### Cloudflare Durable Objects Deep Dive
+
+**What They Are**:
+- Single-threaded JavaScript objects with persistent storage
+- Each object has its own SQLite database
+- Strong consistency within a single object
+- WebSocket Hibernation API (connections stay open without compute cost)
+
+**Perfect for Canopy Because**:
+- Each session/feature = one Durable Object
+- Built-in SQLite for session state
+- Native WebSocket support for real-time updates
+- Automatic state replication
+- Pay only when active (hibernation is free)
+
+**Architecture**:
+```typescript
+// Feature Durable Object
+export class FeatureDO {
+  private state: DurableObjectState;
+  private storage: DurableObjectStorage;
+  private sessions: Map<string, WebSocket>;
+  private db: SqlStorage; // Built-in SQLite
+
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state;
+    this.storage = state.storage;
+    this.db = state.storage.sql;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    // Handle HTTP requests (REST API)
+    const url = new URL(request.url);
+
+    if (url.pathname === '/sessions') {
+      return this.handleCreateSession(request);
+    }
+
+    if (url.pathname === '/context') {
+      return this.handleGetContext(request);
+    }
+
+    // Upgrade to WebSocket for real-time
+    if (request.headers.get('Upgrade') === 'websocket') {
+      return this.handleWebSocket(request);
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+
+  async handleWebSocket(request: Request): Promise<Response> {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    // Accept WebSocket
+    this.state.acceptWebSocket(server);
+
+    // Store metadata
+    const userId = request.headers.get('X-User-Id');
+    server.serializeAttachment({ userId });
+
+    // Broadcast to other connections
+    this.broadcast({
+      type: 'participant_joined',
+      userId: userId
+    }, server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string) {
+    const data = JSON.parse(message);
+
+    if (data.type === 'prompt') {
+      // Add to prompt queue in SQLite
+      await this.db.exec(`
+        INSERT INTO prompts (session_id, user_id, content, created_at)
+        VALUES (?, ?, ?, ?)
+      `, data.sessionId, data.userId, data.content, Date.now());
+
+      // Trigger agent (send to sandbox)
+      await this.triggerAgent(data.sessionId, data.content);
+
+      // Broadcast to all participants
+      this.broadcast({
+        type: 'prompt_queued',
+        sessionId: data.sessionId,
+        prompt: data.content
+      });
+    }
+  }
+
+  broadcast(message: any, exclude?: WebSocket) {
+    const msg = JSON.stringify(message);
+    this.state.getWebSockets().forEach(ws => {
+      if (ws !== exclude && ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+      }
+    });
+  }
+
+  async alarm() {
+    // Called periodically to clean up idle sessions
+    const idleTime = 30 * 60 * 1000; // 30 minutes
+    const idleSessions = await this.db.exec(`
+      SELECT id FROM sessions
+      WHERE last_activity < ?
+    `, Date.now() - idleTime);
+
+    for (const session of idleSessions) {
+      await this.terminateSession(session.id);
+    }
+  }
+}
+```
+
+**How Ramp Uses Durable Objects**:
+- Each session = one Durable Object instance
+- SQLite stores conversation history, session state, events
+- WebSocket Hibernation keeps connections open to all clients
+- When agent produces output, DO broadcasts to all connected clients
+- Automatic state persistence (no separate DB needed)
+
+### Cloudflare Browser Rendering (Sandboxes)
+
+**What It Is**:
+- Managed headless Chrome instances
+- Run in Cloudflare's network (globally distributed)
+- Can execute arbitrary JavaScript
+- Capture screenshots, PDFs
+
+**How It Could Work for Canopy**:
+```typescript
+export default {
+  async fetch(request, env): Promise<Response> {
+    const browser = await puppeteer.launch(env.MYBROWSER);
+    const page = await browser.newPage();
+
+    // Navigate to your app
+    await page.goto('https://localhost:3000');
+
+    // Let agent interact via Puppeteer
+    await page.click('#login-button');
+
+    // Take screenshot for verification
+    const screenshot = await page.screenshot();
+
+    await browser.close();
+
+    return new Response(screenshot, {
+      headers: { 'Content-Type': 'image/png' }
+    });
+  }
+};
+```
+
+**Limitations**:
+- **Not suitable for OpenCode execution**: Browser rendering is for browser automation, not running arbitrary Linux commands
+- Can't run git, npm, build tools, etc.
+- Only useful for visual verification part
+
+### Complete Cloudflare-Native Architecture
+
+**IMPORTANT INSIGHT**: Use Durable Objects per **Feature** (not per session)
+- Each Feature DO manages multiple sessions
+- Better for cross-session queries
+- Natural place for team chat, collaborative notes
+- Easier to implement feature-level collaboration
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Client Layer                          │
+│     (Web, Slack Bot, Chrome Extension)                   │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│            Cloudflare Workers (Edge API)                 │
+│  - Route requests to correct Feature DO                 │
+│  - Authentication (GitHub OAuth)                         │
+│  - Rate limiting                                         │
+└─────────────────────────────────────────────────────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  Feature DO      │  │  Feature DO      │  │  Feature DO      │
+│  "Add OAuth"     │  │  "Fix Login"     │  │  "..."           │
+│                  │  │                  │  │                  │
+│ - SQLite DB      │  │ - SQLite DB      │  │ - SQLite DB      │
+│   • Sessions     │  │   • Sessions     │  │   • Sessions     │
+│   • Context      │  │   • Context      │  │   • Context      │
+│   • Chat msgs    │  │   • Chat msgs    │  │   • Chat msgs    │
+│   • Notes        │  │   • Notes        │  │   • Notes        │
+│ - WebSockets     │  │ - WebSockets     │  │ - WebSockets     │
+│   (team collab)  │  │   (team collab)  │  │   (team collab)  │
+│                  │  │                  │  │                  │
+│ Manages:         │  │ Manages:         │  │ Manages:         │
+│ ├─ Session 1     │  │ ├─ Session 1     │  │ ├─ Session 1     │
+│ ├─ Session 2     │  │ ├─ Session 2     │  │ └─ Session 2     │
+│ └─ Session 3     │  │ └─ Session 3     │  │                  │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+        │                 │                 │
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│         Sandbox Layer (E2B/Modal - NOT Cloudflare)       │
+│                                                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ E2B/Modal    │  │ E2B/Modal    │  │ E2B/Modal    │  │
+│  │ Sandbox 1    │  │ Sandbox 2    │  │ Sandbox 3    │  │
+│  │              │  │              │  │              │  │
+│  │ OpenCode     │  │ OpenCode     │  │ OpenCode     │  │
+│  │ Server       │  │ Server       │  │ Server       │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+               ┌────────────────────┐
+               │  Cloudflare R2     │
+               │  (Object Storage)  │
+               │  - Snapshots       │
+               │  - Artifacts       │
+               └────────────────────┘
+                          │
+                          ▼
+               ┌────────────────────┐
+               │  MongoDB Atlas     │
+               │  (Global Data)     │
+               │  - Users           │
+               │  - Teams           │
+               │  - Analytics       │
+               │  - Feature Archive │
+               └────────────────────┘
+```
+
+### Critical Insight: Durable Objects per Feature (Not Session)
+
+**The Problem with DO per Session**:
+- ❌ Hard to query across sessions in same feature
+- ❌ No natural place for cross-session context
+- ❌ Complex coordination between session DOs
+- ❌ Can't easily implement feature-level chat/notes
+- ❌ Each session isolated (defeats feature grouping purpose)
+
+**The Solution: DO per Feature**:
+- ✅ One Feature DO manages all its sessions
+- ✅ Easy cross-session queries (same SQLite DB)
+- ✅ Natural home for feature context
+- ✅ Can add team chat within feature
+- ✅ Collaborative notes per feature
+- ✅ Simpler architecture (fewer DOs)
+
+**Feature DO Schema**:
+```sql
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  status TEXT,
+  sandbox_id TEXT,
+  created_at INTEGER,
+  created_by TEXT
+);
+
+CREATE TABLE context (
+  id TEXT PRIMARY KEY,
+  type TEXT, -- 'learning' | 'decision' | 'file'
+  content TEXT,
+  from_session TEXT,
+  importance TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  content TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE notes (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  content TEXT,
+  created_by TEXT,
+  updated_at INTEGER
+);
+
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  type TEXT,
+  payload TEXT,
+  created_at INTEGER
+);
+```
+
+**Benefits**:
+- All sessions in feature visible in one query
+- Cross-session context joins trivial (same DB)
+- WebSocket per feature (all team members see all sessions)
+- Can add @mentions, reactions, collaborative features
+- Much better for your "feature grouping" vision
+
+**Example Code**:
+```typescript
+export class FeatureDO {
+  async querySiblingSession(currentSessionId: string, question: string) {
+    // All sessions accessible - same SQLite!
+    const sessions = await this.db.exec(`
+      SELECT * FROM sessions
+      WHERE id != ? AND status = 'completed'
+    `, currentSessionId).toArray();
+
+    // RAG over all session events
+    const events = await this.db.exec(`
+      SELECT * FROM events
+      WHERE session_id IN (${sessions.map(s => s.id).join(',')})
+      ORDER BY created_at DESC
+    `).toArray();
+
+    // Use AI to answer question from events
+    return await this.queryWithAI(question, events);
+  }
+
+  async getFeatureChat() {
+    // Built-in team chat for feature
+    return await this.db.exec(`
+      SELECT * FROM chat_messages
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).toArray();
+  }
+}
+```
+
+### Cloudflare Sandboxes Clarification
+
+**Important**: There are different "Cloudflare sandboxes":
+
+#### 1. Cloudflare Browser Rendering (NOT suitable)
+- Headless Chrome for web automation
+- Good for: Screenshots, PDF generation, visual testing
+- **Bad for**: Running OpenCode, git, npm, etc.
+- **Verdict**: Can't use for agent execution
+
+#### 2. Cloudflare Workers for Platforms (Potentially suitable)
+- Let you run user's code in Workers
+- V8 isolates (JavaScript/WASM only)
+- **Limitation**: Can't run native binaries (git, node, python)
+- **Verdict**: Not suitable for full dev environment
+
+#### 3. Third-party on Cloudflare (Best option)
+- Use E2B/Modal for sandboxes
+- Cloudflare for API/state/real-time
+- Keep them separate
+- **Verdict**: This is the way (and what we recommend)
+
+**Conclusion**: Cloudflare doesn't have suitable sandboxes for OpenCode. Must use E2B/Modal/self-hosted.
+
+### Why Hybrid (Cloudflare + E2B/Modal)?
+
+**Cloudflare is GREAT for**:
+- ✅ API layer (Workers + Durable Objects)
+- ✅ Real-time WebSocket management (Hibernation API)
+- ✅ Session/Feature state management (SQLite per DO)
+- ✅ Edge distribution (low latency globally)
+- ✅ Cost efficiency (pay per request, hibernation free)
+
+**Cloudflare is NOT GREAT for**:
+- ❌ Running Linux commands (git, npm, etc.)
+- ❌ Full dev environments (Node.js, Python, databases)
+- ❌ Long-running processes (Workers have 30s CPU limit, even with Durable Objects)
+- ❌ Arbitrary code execution in sandboxes
+
+**Solution**: Hybrid Architecture
+- **Cloudflare**: API + State + Real-time sync
+- **E2B/Modal**: Agent execution sandboxes
+
+### Implementation Example
+
+#### 1. Cloudflare Worker (Router)
+```typescript
+// worker.ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Route to appropriate Durable Object
+    if (url.pathname.startsWith('/features')) {
+      const featureId = url.pathname.split('/')[2];
+
+      // Get Durable Object stub
+      const id = env.FEATURES.idFromName(featureId);
+      const stub = env.FEATURES.get(id);
+
+      // Forward request
+      return stub.fetch(request);
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+};
+```
+
+#### 2. Feature Durable Object (State Management)
+```typescript
+// feature-do.ts
+export class FeatureDO {
+  private state: DurableObjectState;
+  private db: SqlStorage;
+  private env: Env;
+
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state;
+    this.db = state.storage.sql;
+    this.env = env;
+
+    // Initialize schema
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        status TEXT,
+        created_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS context (
+        id TEXT PRIMARY KEY,
+        type TEXT, -- 'learning' | 'decision' | 'file'
+        content TEXT,
+        from_session TEXT,
+        created_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT,
+        type TEXT,
+        payload TEXT,
+        created_at INTEGER
+      );
+    `);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    // WebSocket upgrade
+    if (request.headers.get('Upgrade') === 'websocket') {
+      return this.handleWebSocket(request);
+    }
+
+    // REST API
+    if (url.pathname.endsWith('/sessions') && request.method === 'POST') {
+      return this.createSession(request);
+    }
+
+    if (url.pathname.endsWith('/context')) {
+      return this.getContext();
+    }
+
+    if (url.pathname.includes('/sessions/') && url.pathname.endsWith('/prompt')) {
+      return this.handlePrompt(request);
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+
+  async createSession(request: Request): Promise<Response> {
+    const { title, scope } = await request.json();
+    const sessionId = crypto.randomUUID();
+
+    // Store in SQLite
+    await this.db.exec(`
+      INSERT INTO sessions (id, title, status, created_at)
+      VALUES (?, ?, 'active', ?)
+    `, sessionId, title, Date.now());
+
+    // Create sandbox via E2B API
+    const sandbox = await fetch('https://api.e2b.dev/sandboxes', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.env.E2B_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        template: 'opencode-node',
+        metadata: { sessionId, featureId: this.state.id.toString() }
+      })
+    });
+
+    const { sandboxId } = await sandbox.json();
+
+    // Store sandbox ID
+    await this.db.exec(`
+      UPDATE sessions SET sandbox_id = ? WHERE id = ?
+    `, sandboxId, sessionId);
+
+    // Broadcast event
+    this.broadcast({
+      type: 'session_created',
+      sessionId,
+      title
+    });
+
+    return Response.json({ sessionId, sandboxId });
+  }
+
+  async handlePrompt(request: Request): Promise<Response> {
+    const { sessionId, content, userId } = await request.json();
+
+    // Get session
+    const session = await this.db.exec(`
+      SELECT * FROM sessions WHERE id = ?
+    `, sessionId).toArray()[0];
+
+    // Send prompt to sandbox (E2B)
+    const response = await fetch(`https://api.e2b.dev/sandboxes/${session.sandbox_id}/execute`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.env.E2B_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        command: `opencode prompt "${content}"`
+      })
+    });
+
+    // Stream response back via WebSocket
+    const stream = response.body;
+    const reader = stream.getReader();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = new TextDecoder().decode(value);
+      this.broadcast({
+        type: 'agent_output',
+        sessionId,
+        content: chunk
+      });
+    }
+
+    return Response.json({ success: true });
+  }
+
+  async getContext(): Promise<Response> {
+    const context = await this.db.exec(`
+      SELECT * FROM context ORDER BY created_at DESC
+    `).toArray();
+
+    return Response.json({
+      learnings: context.filter(c => c.type === 'learning'),
+      decisions: context.filter(c => c.type === 'decision'),
+      keyFiles: context.filter(c => c.type === 'file')
+    });
+  }
+
+  async handleWebSocket(request: Request): Promise<Response> {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    this.state.acceptWebSocket(server);
+
+    // Send current state to new client
+    const sessions = await this.db.exec('SELECT * FROM sessions').toArray();
+    server.send(JSON.stringify({
+      type: 'initial_state',
+      sessions
+    }));
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  broadcast(message: any) {
+    const msg = JSON.stringify(message);
+    this.state.getWebSockets().forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+      }
+    });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string) {
+    const data = JSON.parse(message);
+
+    // Handle different message types
+    if (data.type === 'add_learning') {
+      await this.db.exec(`
+        INSERT INTO context (id, type, content, from_session, created_at)
+        VALUES (?, 'learning', ?, ?, ?)
+      `, crypto.randomUUID(), data.content, data.sessionId, Date.now());
+
+      this.broadcast({
+        type: 'context_updated',
+        learning: data.content
+      });
+    }
+  }
+}
+```
+
+#### 3. Wrangler Configuration
+```toml
+# wrangler.toml
+name = "canopy-api"
+main = "src/worker.ts"
+compatibility_date = "2024-01-01"
+
+[durable_objects]
+bindings = [
+  { name = "FEATURES", class_name = "FeatureDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["FeatureDO"]
+
+[vars]
+E2B_API_URL = "https://api.e2b.dev"
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "canopy-artifacts"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "canopy-global"
+database_id = "..."
+```
+
+### Cloudflare vs. Alternatives Comparison
+
+| Feature | Cloudflare DO | E2B/Modal | Self-hosted |
+|---------|---------------|-----------|-------------|
+| **API/State** | ⭐⭐⭐⭐⭐ Perfect fit | ❌ Not designed for this | ✅ Full control |
+| **Real-time** | ⭐⭐⭐⭐⭐ Hibernation API | ⚠️ Need separate WS server | ✅ Roll your own |
+| **Code Execution** | ❌ Limited (30s CPU) | ⭐⭐⭐⭐⭐ Purpose-built | ✅ Full control |
+| **Global Distribution** | ⭐⭐⭐⭐⭐ Edge network | ⚠️ Limited regions | ❌ Single region |
+| **Cost at Scale** | ⭐⭐⭐⭐ Efficient | ⭐⭐⭐ Pay per use | ⭐⭐⭐⭐⭐ Cheapest |
+| **Dev Experience** | ⭐⭐⭐⭐ Great | ⭐⭐⭐⭐⭐ Excellent | ⭐⭐ Complex |
+| **Vendor Lock-in** | ⚠️ High | ⚠️ Medium | ✅ None |
+
+### Pricing Comparison
+
+**Cloudflare Durable Objects**:
+- $0.15 per million requests
+- $0.20 per GB-month storage
+- WebSocket connections: FREE when hibernating
+- Workers compute: $0.02 per million requests
+
+**E2B Sandboxes**:
+- $0.10 per hour of sandbox runtime
+- ~$2.40 per day if running 24/7
+- $72/month per always-on sandbox
+- Cheaper if short-lived sessions
+
+**Hybrid Cost Estimate** (100 concurrent sessions):
+- Cloudflare API: ~$50/month (mostly free tier)
+- E2B Sandboxes: ~$1000/month (assuming 4hr avg session life)
+- **Total**: ~$1050/month for 100 concurrent sessions
+
+**Modal** (alternative to E2B):
+- Similar pricing to E2B
+- May be slightly cheaper at very high scale
+
+### Recommended Cloudflare Strategy
+
+#### Option 1: Cloudflare + E2B (Recommended for MVP)
+```
+API Layer: Cloudflare Workers + Durable Objects
+Real-time: Cloudflare Agents SDK (WebSocket Hibernation)
+State: SQLite (built into DOs)
+Sandboxes: E2B
+Storage: Cloudflare R2
+```
+
+**Why**:
+- Fast to build (Wrangler CLI, great DX)
+- Durable Objects perfect for feature/session state
+- E2B handles complex sandbox requirements
+- Cloudflare free tier generous (low initial cost)
+- Easy to deploy globally
+
+**When it breaks down**:
+- Very high scale (>1000 concurrent sessions)
+- Need more control over sandbox infrastructure
+- Want to minimize vendor lock-in
+
+#### Option 2: Cloudflare + Modal
+Same as Option 1 but use Modal instead of E2B:
+- Better if team is Python-heavy
+- Proven at scale (Ramp uses it)
+- More mature platform
+
+#### Option 3: Cloudflare + Self-hosted Sandboxes
+```
+API: Cloudflare
+Sandboxes: Your own Docker/K8s cluster
+```
+
+**When to choose**:
+- Enterprise with ops team
+- Need full control
+- Very high scale (cheaper at 1000+ sessions)
+- Data sovereignty requirements
+
+#### Option 4: Pure Cloudflare (NOT RECOMMENDED)
+Try to run everything on Cloudflare Workers
+
+**Why not**:
+- Can't run full dev environment in Workers
+- 30s CPU limit too short for agent tasks
+- Would need to severely limit what agent can do
+- Cloudflare Browser Rendering not suitable for OpenCode
+
+### Cloudflare Advantages for Canopy
+
+1. **Perfect State Management**:
+   - Each Feature = Durable Object
+   - Built-in SQLite (no external DB needed for session state)
+   - Strong consistency within feature
+
+2. **Free WebSocket Connections**:
+   - Hibernation API = connections open for free
+   - Critical for real-time multiplayer
+   - No need for separate WebSocket server
+
+3. **Edge Distribution**:
+   - API runs globally
+   - Low latency worldwide
+   - Users connect to nearest edge location
+
+4. **Developer Experience**:
+   - Wrangler CLI (deploy in seconds)
+   - TypeScript native
+   - Great local development (Miniflare)
+   - Integrated testing
+
+5. **Cost Efficiency**:
+   - Generous free tier
+   - Pay only for active compute
+   - No idle costs for API layer
+
+6. **Ecosystem Integration**:
+   - R2 for storage (S3-compatible)
+   - D1 for global database (if needed)
+   - Pages for frontend hosting
+   - Workers for API
+
+### Cloudflare Challenges for Canopy
+
+1. **Vendor Lock-in**:
+   - Durable Objects are Cloudflare-specific
+   - Hard to migrate away
+   - **Mitigation**: Abstract DO logic behind interfaces
+
+2. **Debugging**:
+   - Distributed state harder to debug
+   - Need good logging
+   - **Mitigation**: Use Cloudflare Tail (real-time logs)
+
+3. **Still Need Separate Sandboxes**:
+   - Can't avoid E2B/Modal/self-hosted
+   - Adds complexity
+   - **Mitigation**: This is unavoidable given requirements
+
+4. **Learning Curve**:
+   - Durable Objects mental model different
+   - Event-driven, not request-response
+   - **Mitigation**: Good documentation, examples
+
+### MongoDB vs PostgreSQL for Canopy
+
+**Question**: Should we use MongoDB instead of PostgreSQL for global data?
+
+#### MongoDB Advantages for Canopy
+
+**1. Schema Flexibility**:
+```javascript
+// Can evolve schema without migrations
+{
+  featureId: "uuid",
+  title: "Add OAuth",
+  sessions: [
+    { id: "s1", title: "Research", customField: "can add anytime" }
+  ],
+  context: {
+    learnings: [...],
+    decisions: [...],
+    // Easy to add new fields
+    designDocs: [...],
+    relatedIssues: [...]
+  }
+}
+```
+
+**2. Natural Fit for Hierarchical Data**:
+- Features → Sessions → Events is hierarchical
+- Can denormalize for fast reads
+- No joins needed for common queries
+
+**3. Great for Unstructured Context**:
+```javascript
+{
+  context: [
+    { type: "learning", content: "...", metadata: { /* any shape */ } },
+    { type: "decision", rationale: "...", alternatives: [...] },
+    { type: "code_snippet", language: "ts", code: "..." }
+  ]
+}
+```
+
+**4. Horizontal Scaling**:
+- Sharding built-in
+- Replica sets for HA
+- Good for multi-region
+
+**5. Developer Experience**:
+- No schema migrations
+- Easier to iterate quickly
+- Good TypeScript support (Mongoose, Prisma)
+
+**6. MongoDB Atlas**:
+- Managed service (like Cloudflare D1)
+- Global clusters
+- Change streams (like event sourcing)
+- Full-text search built-in
+
+#### PostgreSQL Advantages for Canopy
+
+**1. ACID Guarantees**:
+- Stronger consistency
+- Better for financial/audit data
+- Transactions across tables
+
+**2. Powerful Queries**:
+```sql
+-- Complex joins across features
+SELECT f.title, COUNT(s.id) as session_count,
+       AVG(s.duration) as avg_duration
+FROM features f
+JOIN sessions s ON s.feature_id = f.id
+WHERE s.status = 'completed'
+GROUP BY f.id
+HAVING COUNT(s.id) > 5;
+```
+
+**3. JSONB for Flexibility**:
+```sql
+-- Get both structure AND flexibility
+CREATE TABLE features (
+  id UUID PRIMARY KEY,
+  title TEXT NOT NULL,
+  context JSONB, -- Unstructured data here
+  created_at TIMESTAMP
+);
+
+-- Query JSON with SQL
+SELECT * FROM features
+WHERE context @> '{"type": "learning"}';
+```
+
+**4. Better Aggregations**:
+- Window functions
+- CTEs (Common Table Expressions)
+- Advanced analytics
+
+**5. More Mature Ecosystem**:
+- Better tooling
+- More extensions (PostGIS, pg_vector for embeddings)
+- TimescaleDB for time-series
+
+**6. Cost**:
+- Often cheaper at scale
+- Supabase (free tier generous)
+- Self-hosted cheaper
+
+#### Side-by-Side Comparison
+
+| Feature | MongoDB | PostgreSQL |
+|---------|---------|------------|
+| **Schema Evolution** | ⭐⭐⭐⭐⭐ No migrations | ⭐⭐⭐ Need migrations |
+| **Complex Queries** | ⭐⭐⭐ Aggregation pipeline | ⭐⭐⭐⭐⭐ SQL power |
+| **Transactions** | ⭐⭐⭐ Multi-doc transactions | ⭐⭐⭐⭐⭐ ACID native |
+| **Hierarchical Data** | ⭐⭐⭐⭐⭐ Natural fit | ⭐⭐⭐ Need joins |
+| **Full-Text Search** | ⭐⭐⭐⭐ Built-in | ⭐⭐⭐ pg_trgm extension |
+| **Horizontal Scale** | ⭐⭐⭐⭐⭐ Sharding native | ⭐⭐⭐ Harder (Citus) |
+| **Learning Curve** | ⭐⭐⭐⭐ Easy | ⭐⭐⭐⭐ Easy (if know SQL) |
+| **Ecosystem** | ⭐⭐⭐⭐ Good | ⭐⭐⭐⭐⭐ Excellent |
+| **Cost** | ⭐⭐⭐ Atlas pricing | ⭐⭐⭐⭐ Cheaper |
+| **Type Safety** | ⭐⭐⭐ Mongoose/Prisma | ⭐⭐⭐⭐ Prisma/Drizzle |
+
+#### Hybrid Approach: Best of Both Worlds
+
+**Use Both!**
+
+```
+Cloudflare Durable Objects (SQLite)
+├─ Feature state (active features, live data)
+├─ Session state (current sessions)
+├─ Real-time context (learnings, decisions)
+└─ Chat & notes (ephemeral collaboration)
+
+MongoDB Atlas
+├─ Feature archive (completed features)
+├─ Analytics (usage patterns, metrics)
+├─ User profiles & teams
+├─ Audit logs
+└─ Search index (full-text across all features)
+
+PostgreSQL (optional - if need analytics)
+├─ Time-series data (session metrics)
+├─ Aggregated reports
+└─ Complex joins for dashboards
+```
+
+#### Recommendation for Canopy
+
+**Primary: Durable Objects (SQLite) + MongoDB**
+
+**Why MongoDB over PostgreSQL**:
+1. ✅ Schema flexibility (context structure will evolve)
+2. ✅ Natural fit for hierarchical features/sessions
+3. ✅ Change Streams (real-time sync from DOs to Mongo)
+4. ✅ Full-text search (search across all features/sessions)
+5. ✅ Horizontal scaling (when you have 1000s of teams)
+6. ✅ Good for unstructured agent outputs
+
+**When to choose PostgreSQL instead**:
+- Your team already experts in PostgreSQL
+- Need complex analytical queries
+- Want to use pg_vector for embeddings (RAG)
+- Prefer ACID guarantees over flexibility
+- Want to minimize vendor count
+
+#### Recommended Data Flow
+
+```
+Active Feature Session
+      ↓ (real-time)
+Durable Object (SQLite)
+      ↓ (on completion)
+MongoDB Atlas (archive)
+      ↓ (daily)
+Analytics (if needed)
+```
+
+**Example Schema (MongoDB)**:
+```typescript
+// Features Collection
+interface Feature {
+  _id: string;
+  teamId: string;
+  title: string;
+  status: 'active' | 'completed' | 'archived';
+
+  // Denormalized for fast access
+  sessions: {
+    id: string;
+    title: string;
+    status: string;
+    createdBy: string;
+    duration: number;
+    prUrl?: string;
+    merged?: boolean;
+  }[];
+
+  context: {
+    learnings: Array<{
+      content: string;
+      fromSession: string;
+      importance: 'low' | 'medium' | 'high';
+      timestamp: Date;
+    }>;
+    decisions: Array<{
+      decision: string;
+      rationale: string;
+      alternatives: string[];
+      madeBy: string;
+      timestamp: Date;
+    }>;
+  };
+
+  metrics: {
+    totalSessions: number;
+    completedSessions: number;
+    avgSessionDuration: number;
+    totalPrompts: number;
+    successRate: number;
+  };
+
+  collaboration: {
+    participants: string[];
+    chatMessageCount: number;
+    notesCount: number;
+  };
+
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt?: Date;
+
+  // Flexible - can add anything
+  tags?: string[];
+  priority?: number;
+  linkedIssues?: string[];
+  customFields?: Record<string, any>;
+}
+
+// Users Collection
+interface User {
+  _id: string;
+  githubId: string;
+  email: string;
+  name: string;
+  teams: string[];
+  stats: {
+    featuresCreated: number;
+    sessionsParticipated: number;
+    promptsSent: number;
+    prsMerged: number;
+  };
+  createdAt: Date;
+}
+
+// Teams Collection
+interface Team {
+  _id: string;
+  name: string;
+  members: Array<{
+    userId: string;
+    role: 'admin' | 'member' | 'viewer';
+    joinedAt: Date;
+  }>;
+  repositories: Array<{
+    url: string;
+    enabled: boolean;
+  }>;
+  quotas: {
+    maxConcurrentSessions: number;
+    maxSessionDuration: number;
+  };
+  createdAt: Date;
+}
+```
+
+**MongoDB Indexes**:
+```javascript
+// Features
+db.features.createIndex({ teamId: 1, status: 1 });
+db.features.createIndex({ "sessions.id": 1 });
+db.features.createIndex({ createdAt: -1 });
+db.features.createIndex({ "$**": "text" }); // Full-text
+
+// Users
+db.users.createIndex({ githubId: 1 }, { unique: true });
+db.users.createIndex({ email: 1 }, { unique: true });
+
+// Teams
+db.teams.createIndex({ "members.userId": 1 });
+```
+
+**MongoDB Advantages Recap**:
+- Schema evolution without downtime
+- Hierarchical data natural fit
+- Full-text search built-in
+- Change streams for sync
+- Atlas global clusters
+- Great for AI/agent outputs (unstructured)
+
+**Cost Estimate**:
+- MongoDB Atlas: ~$60/month (M10 shared, 10GB)
+- Cloudflare: ~$5/month (Durable Objects usage)
+- **Total**: ~$65/month for DB layer
+
+### Final Recommendation on Cloudflare
+
+**Use Cloudflare Durable Objects for**:
+- ✅ Feature coordination (ONE DO per feature, not per session!)
+- ✅ Session state management (all sessions in feature)
+- ✅ Real-time WebSocket handling (feature-level collaboration)
+- ✅ API layer
+- ✅ Feature context storage (learnings, decisions)
+- ✅ Team chat within feature
+- ✅ Collaborative notes
+
+**Do NOT use Cloudflare for**:
+- ❌ Running OpenCode sandboxes (use E2B/Modal)
+- ❌ Long-running agent execution
+- ❌ Full Linux development environments
+- ❌ Global/persistent data (use MongoDB)
+
+**Best Architecture** (Updated):
+```
+Frontend: Cloudflare Pages
+API: Cloudflare Workers
+State: Cloudflare Durable Objects (ONE per feature)
+  ├─ Sessions (all sessions in feature)
+  ├─ Context (cross-session learnings)
+  ├─ Chat (team collaboration)
+  └─ Notes (shared docs)
+Real-time: Cloudflare Agents SDK
+Sandboxes: E2B or Modal (NOT Cloudflare)
+Object Storage: Cloudflare R2
+Global Database: MongoDB Atlas
+  ├─ Users & Teams
+  ├─ Feature Archive
+  ├─ Analytics
+  └─ Search Index
+```
+
+**Key Insight**:
+- **Active features**: Durable Objects (fast, real-time)
+- **Completed features**: MongoDB (searchable, analytics)
+- **Sandboxes**: E2B/Modal (only option for OpenCode)
+
+This gives you:
+- Ramp's proven approach (they use Durable Objects)
+- Best-in-class real-time (WebSocket Hibernation)
+- Proper sandboxing (E2B/Modal)
+- Cross-session queries (same Feature DO)
+- Team collaboration (chat, notes in DO)
+- Global edge distribution
+- Cost efficiency
+- Schema flexibility (MongoDB)
+
+---
+
 ## Recommended Architecture
 
-### Hybrid Approach: Event-Driven + Actor Model + Sandboxed Execution
+### Hybrid Approach: Cloudflare Edge + Sandboxed Execution
 
-**Why**: Combines best of both worlds - event-driven for scalability, actor model for state management, sandboxed execution for security.
+**Why**: Combines best of both worlds - Cloudflare edge for API/state/real-time, E2B/Modal for sandbox execution.
+
+**This is Ramp's approach**: Cloudflare Durable Objects + Modal sandboxes
 
 ```
                     ┌─────────────────────────────────┐
@@ -2278,11 +3431,19 @@ az container create \
 
 ### Recommended Tech Stack for Canopy
 
-**API & Backend**:
-- **Language**: TypeScript/Node.js (best OpenCode/E2B support)
-- **Framework**: Fastify (faster than Express) or Hono (edge-ready)
-- **Real-Time**: Socket.io or Cloudflare Agents SDK
-- **Event Bus**: Redis Streams (pub/sub + persistence)
+#### ⭐ PRIMARY RECOMMENDATION: Cloudflare + E2B/Modal
+
+**Frontend**:
+- **Hosting**: Cloudflare Pages
+- **Framework**: React/Next.js, Vue, or Svelte
+- **Real-time**: Native WebSocket → Cloudflare Workers
+
+**API & State Management**:
+- **Platform**: Cloudflare Workers + Durable Objects
+- **Language**: TypeScript
+- **State Storage**: SQLite (built into Durable Objects)
+- **Real-Time**: Cloudflare Agents SDK (WebSocket Hibernation)
+- **Each Feature** = One Durable Object instance
 
 **Sandbox Execution**:
 - **Primary**: E2B (TypeScript-first, cost-effective) or Modal (Python-friendly, proven)
@@ -2290,34 +3451,67 @@ az container create \
 - **Image Building**: GitHub Actions or similar CI pipeline
 
 **Data Layer**:
-- **Primary DB**: PostgreSQL 16+ (JSONB for flexible schemas)
-  - Features table
-  - Sessions table
-  - Events table (event sourcing)
-  - Users & Teams tables
-- **Cache & Pub/Sub**: Redis 7+ (Streams, Hash, Sorted Sets)
-- **Object Storage**: S3 or Cloudflare R2 (snapshots, artifacts)
-
-**Feature Coordination**:
-- **Context Store**: Redis Hash per feature
-- **Session Management**: In-memory with DB persistence
-- **Event Bus**: Redis Streams (per-feature channels)
+- **Session/Feature State**: SQLite in Durable Objects (transient)
+- **Global Data**: Cloudflare D1 (SQLite at edge) for users, teams, analytics
+- **Object Storage**: Cloudflare R2 (snapshots, artifacts, screenshots)
+- **Cache**: Durable Object storage (key-value)
 
 **Authentication & Integrations**:
-- **Auth**: GitHub OAuth (Passport.js or NextAuth)
-- **Git Operations**: Simple-git or isomorphic-git
-- **GitHub API**: Octokit (@octokit/rest)
+- **Auth**: GitHub OAuth (handled in Workers)
+- **Git Operations**: Via OpenCode in sandboxes
+- **GitHub API**: Octokit (@octokit/rest) in Workers
 
 **Monitoring & Observability**:
-- **Metrics**: Prometheus + Grafana
-- **Logging**: Structured logging (Pino or Winston) → Loki/DataDog
-- **Tracing**: OpenTelemetry
-- **Error Tracking**: Sentry
+- **Logging**: Cloudflare Tail + Logpush → DataDog/Axiom
+- **Metrics**: Workers Analytics + custom metrics
+- **Tracing**: Workers Traces
+- **Error Tracking**: Sentry (via Workers)
 
-**Infrastructure** (choose based on preference):
-- **Serverless**: Cloudflare Workers + Durable Objects + E2B
-- **Container**: Docker + Kubernetes + E2B/Modal
-- **Hybrid**: Vercel/Netlify (API) + Modal (sandboxes)
+**Why This Stack**:
+- ✅ Same as Ramp (proven at scale)
+- ✅ Minimal infrastructure (no servers to manage)
+- ✅ Edge-native (low latency globally)
+- ✅ Cost-efficient (free tier generous)
+- ✅ Excellent DX (Wrangler CLI)
+- ✅ Built-in real-time (WebSocket Hibernation)
+
+#### Alternative Stack: Traditional Server + E2B
+
+**If you prefer traditional backend**:
+
+**API & Backend**:
+- **Language**: TypeScript/Node.js
+- **Framework**: Fastify or Hono
+- **Real-Time**: Socket.io
+- **Event Bus**: Redis Streams (pub/sub + persistence)
+
+**Data Layer**:
+- **Primary DB**: PostgreSQL 16+ (JSONB for flexible schemas)
+- **Cache & Pub/Sub**: Redis 7+ (Streams, Hash, Sorted Sets)
+- **Object Storage**: S3 or Minio
+
+**Infrastructure**:
+- **Hosting**: Railway, Render, or self-hosted
+- **Container**: Docker + Docker Compose (dev) or Kubernetes (prod)
+
+**When to choose this**:
+- Team already experienced with traditional stack
+- Need more control over infrastructure
+- Want to avoid Cloudflare vendor lock-in
+- Already have ops team for servers
+
+#### Tech Stack Comparison
+
+| Aspect | Cloudflare + E2B | Traditional + E2B |
+|--------|------------------|-------------------|
+| **Time to MVP** | ⭐⭐⭐⭐⭐ Fastest | ⭐⭐⭐ Slower |
+| **Scalability** | ⭐⭐⭐⭐⭐ Auto | ⭐⭐⭐ Manual |
+| **Cost (early)** | ⭐⭐⭐⭐⭐ Free tier | ⭐⭐⭐ $50+/month |
+| **Complexity** | ⭐⭐⭐⭐ Low | ⭐⭐ High |
+| **Control** | ⭐⭐⭐ Limited | ⭐⭐⭐⭐⭐ Full |
+| **Vendor Lock-in** | ⭐⭐ High | ⭐⭐⭐⭐ Low |
+| **Global Edge** | ⭐⭐⭐⭐⭐ Built-in | ❌ Not easily |
+| **Real-time** | ⭐⭐⭐⭐⭐ Free WS | ⭐⭐⭐ Need server |
 
 ### Implementation Phases for Canopy
 
@@ -2493,7 +3687,28 @@ Evolve to **Hybrid Approach** with:
 
 To help you move forward, here are the critical decisions to make:
 
-### 1. Sandbox Provider
+### 1. Backend Platform
+**Decision needed**: Traditional server or edge/serverless?
+
+**Recommendation**: **Cloudflare Workers + Durable Objects**
+
+**Rationale**:
+- Same stack Ramp uses (proven at scale)
+- Built-in real-time (WebSocket Hibernation = free)
+- Perfect for feature/session state (SQLite per DO)
+- Edge distribution (low latency globally)
+- Minimal ops burden (no servers to manage)
+- Cost-efficient (generous free tier)
+
+**Alternative**: Traditional Node.js + PostgreSQL + Redis (more control, less vendor lock-in)
+
+**Action**:
+1. Create Cloudflare account
+2. Follow Durable Objects tutorial
+3. Build simple feature prototype
+4. Test WebSocket Hibernation
+
+### 2. Sandbox Provider
 **Decision needed**: Which sandbox solution?
 
 **Recommendation**: **E2B** for TypeScript teams, **Modal** for Python teams
@@ -2503,48 +3718,59 @@ To help you move forward, here are the critical decisions to make:
 - E2B: Better DX for Node.js/TypeScript, cost-effective
 - Modal: Better Python support, used by Ramp
 - Both support snapshots, fast startup, good APIs
+- Cloudflare can't do this (30s CPU limit)
 
 **Action**: Set up accounts for both, run benchmarks with OpenCode, choose based on:
 - Language preference of your team
 - Cost at expected scale
 - Developer experience
 
-### 2. Backend Stack
-**Decision needed**: Which language/framework?
-
-**Recommendation**: **TypeScript + Fastify + E2B**
-
-**Rationale**:
-- OpenCode has excellent TypeScript SDK
-- E2B is TypeScript-native
-- Fastify is fast, modern, good ecosystem
-- Single language across API and agent plugins
-- Easier to hire Node.js developers
-
-**Alternative**: Python + FastAPI + Modal (if team is Python-heavy)
-
 ### 3. Real-Time Transport
 **Decision needed**: WebSocket library?
 
-**Recommendation**: **Socket.io** initially, consider **Cloudflare Agents SDK** for scale
+**Recommendation**: **Cloudflare Agents SDK** (if using Cloudflare)
 
 **Rationale**:
-- Socket.io: Easy to start, automatic fallbacks, room support
-- Cloudflare Agents SDK: Better at scale, WebSocket hibernation, edge-native
-- Can switch later without changing architecture
+- WebSocket Hibernation = connections open for free
+- No separate WebSocket server needed
+- Built into Durable Objects
+- Automatic scaling
+
+**Alternative (if not using Cloudflare)**: Socket.io (easy, reliable, good DX)
 
 ### 4. Feature Context Strategy
 **Decision needed**: How to implement shared context?
 
-**Recommendation**: **Strategy B (Shared Context Store with Event Bus)**
+**Recommendation**: **Durable Objects (if using Cloudflare)** or **Redis Shared Store (traditional)**
 
-**Rationale**:
+**Rationale for Durable Objects**:
+- Each feature = one Durable Object
+- Built-in SQLite for structured context
+- Built-in WebSocket broadcasting
+- Strong consistency within feature
+- No separate Redis needed
+
+**Rationale for Redis (traditional)**:
 - Simpler than coordinator (no single point of failure)
 - Redis is fast, reliable, easy to operate
 - Pub/sub naturally handles multi-subscriber
 - Easy to scale horizontally
 
-**Implementation**:
+**Implementation (Cloudflare)**:
+```typescript
+// Feature context in Durable Object's SQLite
+await this.db.exec(`
+  CREATE TABLE context (
+    id TEXT PRIMARY KEY,
+    type TEXT, -- 'learning' | 'decision' | 'file'
+    content TEXT,
+    from_session TEXT,
+    created_at INTEGER
+  )
+`);
+```
+
+**Implementation (Redis)**:
 ```typescript
 Feature context in Redis Hash:
   key: feature:{feature_id}
@@ -2677,11 +3903,32 @@ Track these to validate product-market fit:
 ## Conclusion & Recommendation
 
 ### Start Here (Week 1-2)
-1. **Set up E2B account** (or Modal if Python team)
-2. **Build OpenCode container image**
-3. **Create simple API**: POST /sessions → spawn sandbox → run OpenCode
-4. **Test end-to-end**: User prompt → Agent response → Code change
-5. **Validate**: Can you get a simple change merged?
+
+#### Option A: Cloudflare Stack (Recommended)
+1. **Set up Cloudflare account** (free tier)
+2. **Install Wrangler**: `npm install -g wrangler`
+3. **Create Durable Object project**: `wrangler init canopy-api`
+4. **Set up E2B account** (or Modal)
+5. **Build simple flow**:
+   - POST /features → Create Feature DO
+   - POST /sessions → Spawn E2B sandbox → Start OpenCode
+   - WS /features/:id → Real-time updates
+6. **Test end-to-end**: User prompt → Agent response → Code change
+7. **Deploy to Cloudflare**: `wrangler deploy`
+8. **Validate**: Can you get a simple change merged?
+
+**Time investment**: ~3-5 days for basic prototype
+
+#### Option B: Traditional Stack (More Control)
+1. **Set up PostgreSQL + Redis** (local or Railway)
+2. **Create Node.js + Fastify API**
+3. **Set up E2B account** (or Modal)
+4. **Build OpenCode container image**
+5. **Create simple API**: POST /sessions → spawn sandbox → run OpenCode
+6. **Test end-to-end**: User prompt → Agent response → Code change
+7. **Validate**: Can you get a simple change merged?
+
+**Time investment**: ~5-7 days (more setup required)
 
 ### Then (Week 3-4)
 1. **Add Features table and API**
@@ -2730,16 +3977,237 @@ By end of 2 months: Working prototype with feature-based grouping, shared contex
 
 ---
 
+---
+
+## Final Architecture Summary (Incorporating Your Insights)
+
+### The Winning Architecture: Cloudflare + MongoDB + E2B
+
+Based on your excellent insights about Durable Objects and MongoDB:
+
+```
+┌────────────────────────────────────────────────────┐
+│                 Client Layer                        │
+│  Web (Cloudflare Pages) + Slack + Chrome Ext       │
+└────────────────────────────────────────────────────┘
+                        ↓
+┌────────────────────────────────────────────────────┐
+│              Cloudflare Workers                     │
+│          (API Gateway + Router)                     │
+└────────────────────────────────────────────────────┘
+                        ↓
+┌────────────────────────────────────────────────────┐
+│       ONE Durable Object PER FEATURE               │
+│                                                     │
+│  ┌──────────────────────────────────────────┐     │
+│  │  Feature "Add OAuth Authentication"      │     │
+│  │                                           │     │
+│  │  SQLite Tables:                           │     │
+│  │  ├─ sessions (all 5 sessions)            │     │
+│  │  ├─ context (learnings, decisions)       │     │
+│  │  ├─ chat_messages (team discussion)      │     │
+│  │  ├─ notes (collaborative docs)           │     │
+│  │  └─ events (all session events)          │     │
+│  │                                           │     │
+│  │  WebSockets:                              │     │
+│  │  ├─ All team members connected           │     │
+│  │  ├─ See all sessions in feature          │     │
+│  │  ├─ Chat in real-time                    │     │
+│  │  └─ Collaborative notes                  │     │
+│  │                                           │     │
+│  │  Easy Cross-Session Queries:             │     │
+│  │  SELECT * FROM sessions WHERE ...        │     │
+│  │  SELECT * FROM context WHERE ...         │     │
+│  └──────────────────────────────────────────┘     │
+└────────────────────────────────────────────────────┘
+                        ↓
+         ┌──────────────┴──────────────┐
+         ↓                              ↓
+┌─────────────────┐          ┌──────────────────────┐
+│  E2B/Modal      │          │  MongoDB Atlas       │
+│  Sandboxes      │          │                      │
+│                 │          │  Collections:        │
+│  ┌───────────┐  │          │  ├─ features         │
+│  │ Session 1 │  │          │  ├─ users            │
+│  │ OpenCode  │  │          │  ├─ teams            │
+│  └───────────┘  │          │  ├─ analytics        │
+│  ┌───────────┐  │          │  └─ search_index    │
+│  │ Session 2 │  │          │                      │
+│  │ OpenCode  │  │          │  (Feature archive    │
+│  └───────────┘  │          │   when completed)    │
+│       ...       │          │                      │
+└─────────────────┘          └──────────────────────┘
+         ↓
+┌─────────────────┐
+│  Cloudflare R2  │
+│  ├─ Snapshots   │
+│  ├─ Screenshots │
+│  └─ Artifacts   │
+└─────────────────┘
+```
+
+### Why This Architecture Wins
+
+**1. Durable Objects per Feature (Your Insight)**:
+- ✅ All sessions in same SQLite = easy cross-session queries
+- ✅ Natural place for team chat and notes
+- ✅ WebSocket per feature = all team sees everything
+- ✅ Simpler than DO per session
+- ✅ Perfect for "feature grouping" vision
+
+**2. MongoDB for Global Data (Your Insight)**:
+- ✅ Schema flexibility (context structure will evolve)
+- ✅ Hierarchical data natural fit
+- ✅ Full-text search built-in
+- ✅ Great for unstructured agent outputs
+- ✅ Cheaper than vendor-specific DBs
+
+**3. E2B/Modal for Sandboxes (Unavoidable)**:
+- ❌ Cloudflare sandboxes don't support OpenCode
+- ✅ E2B/Modal purpose-built for code execution
+- ✅ Proven at scale
+
+### Complete Tech Stack
+
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| **Frontend** | Cloudflare Pages + React | Edge hosting, fast |
+| **API** | Cloudflare Workers | Serverless, edge |
+| **Feature State** | Durable Objects (SQLite) | ONE per feature, real-time |
+| **Global Data** | MongoDB Atlas | Flexible schema, search |
+| **Sandboxes** | E2B or Modal | Only option for OpenCode |
+| **Storage** | Cloudflare R2 | S3-compatible, cheap |
+| **Real-time** | Agents SDK | WebSocket Hibernation |
+| **Auth** | GitHub OAuth | User attribution |
+
+### Data Flow
+
+```
+1. User creates feature → Feature DO created
+
+2. User creates session →
+   ├─ Recorded in Feature DO's SQLite
+   └─ E2B sandbox spawned for OpenCode
+
+3. User sends prompt →
+   ├─ Forwarded to OpenCode in sandbox
+   └─ Broadcast to all WebSocket clients (team members)
+
+4. Agent discovers learning →
+   ├─ Saved to Feature DO's context table
+   └─ Broadcast to team (visible immediately)
+
+5. Other session queries context →
+   ├─ Simple SQLite query (same DB!)
+   └─ Gets all learnings from sibling sessions
+
+6. Team members chat →
+   ├─ Messages saved to chat_messages table
+   └─ Real-time via WebSockets
+
+7. Feature completes →
+   ├─ Feature DO data exported to MongoDB
+   └─ Archived for search and analytics
+```
+
+### Cost Estimate (100 Features, 500 Sessions)
+
+| Service | Cost/Month | Notes |
+|---------|-----------|-------|
+| Cloudflare Workers | $5 | Mostly free tier |
+| Cloudflare Durable Objects | $15 | 100 DOs, light usage |
+| MongoDB Atlas | $60 | M10 tier (10GB) |
+| E2B Sandboxes | $1000 | Assuming 4hr avg |
+| Cloudflare R2 | $5 | 100GB storage |
+| **Total** | **$1085/month** | ~$2.17 per session |
+
+### What You Get
+
+**Collaboration Features** (enabled by DO per feature):
+- [x] Team chat within feature
+- [x] Collaborative notes
+- [x] See all sessions in feature
+- [x] Cross-session learnings visible
+- [x] @mentions, reactions
+- [x] Real-time presence (who's online)
+
+**Developer Experience**:
+- [x] Deploy in seconds (Wrangler)
+- [x] No migrations (MongoDB)
+- [x] TypeScript everywhere
+- [x] Edge-native (low latency)
+
+**Production Ready**:
+- [x] Auto-scaling (Cloudflare + E2B)
+- [x] Global distribution
+- [x] Built-in monitoring
+- [x] Cost-efficient
+
+### What Makes This Different from Other Solutions
+
+| Feature | Cursor/Claude | GitHub Copilot | **Canopy** |
+|---------|---------------|----------------|------------|
+| Multiplayer | ❌ | ❌ | ✅ Feature-level |
+| Cross-session context | ❌ | ❌ | ✅ Automatic |
+| Team chat | ❌ | ❌ | ✅ Built-in |
+| Collaborative notes | ❌ | ❌ | ✅ Built-in |
+| Sandboxed | ❌ Local | ✅ Cloud | ✅ Cloud |
+| Concurrent sessions | ⚠️ Limited | ⚠️ Limited | ✅ Unlimited |
+| Works from anywhere | ❌ | ⚠️ Partial | ✅ Yes |
+
+---
+
+## Next Actions
+
+### Week 1: Proof of Concept
+1. Create Cloudflare account
+2. Build simple Feature DO:
+   ```bash
+   wrangler init canopy-poc
+   # Add Durable Object
+   # Test SQLite + WebSockets
+   ```
+3. Set up MongoDB Atlas (free tier)
+4. Connect them together
+5. Test: Create feature → Add session → Query context
+
+### Week 2: E2B Integration
+1. Set up E2B account
+2. Build OpenCode container
+3. Connect Feature DO → E2B sandbox
+4. Test: Send prompt → OpenCode executes → Response back
+
+### Week 3: Real Feature
+1. Implement full Feature DO schema
+2. Add custom OpenCode plugins
+3. Build simple web UI
+4. Test with real coding task
+
+### Week 4: Polish & Deploy
+1. Add team chat
+2. Add collaborative notes
+3. Deploy to Cloudflare
+4. Invite team to test
+
+**Goal**: Working prototype with feature grouping, cross-session context, and team collaboration in 4 weeks.
+
+---
+
 **Questions or Need Clarification?**
 
-This document covers a lot of ground. Here are some follow-up areas we can explore:
+Based on your insights, here are some follow-up areas we can explore:
 
-1. **Detailed API design**: Want OpenAPI spec for all endpoints?
-2. **Database schema**: Need full SQL DDL for all tables?
-3. **Plugin development guide**: Step-by-step for building OpenCode plugins?
-4. **Deployment guide**: Kubernetes manifests, Docker Compose, or serverless setup?
-5. **Cost analysis**: Detailed breakdown of expected costs at different scales?
-6. **Security deep-dive**: Threat modeling, pen-testing approach?
-7. **UI/UX mockups**: Wireframes for feature dashboard, session view?
+1. **Feature DO implementation guide**: Complete TypeScript code for Feature Durable Object?
+2. **MongoDB schema design**: Detailed collections and indexes?
+3. **E2B + OpenCode setup**: Step-by-step integration guide?
+4. **Team chat implementation**: Real-time chat with @mentions, reactions?
+5. **Collaborative notes**: CRDTs for conflict-free editing?
+6. **Cost optimization**: Strategies to reduce E2B costs?
+7. **Migration from Durable Objects**: If you need to scale beyond Cloudflare?
 
-Let me know what would be most helpful to dive into next!
+The architecture is now much stronger with:
+- ✅ Durable Objects per Feature (not session)
+- ✅ MongoDB for flexible global data
+- ✅ E2B/Modal for sandboxes (Cloudflare can't do this)
+
+Let me know what to dive into next!
