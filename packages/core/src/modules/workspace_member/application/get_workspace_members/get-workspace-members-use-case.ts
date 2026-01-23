@@ -3,62 +3,59 @@
 /* ====================================================== */
 
 import { UnauthenticatedError } from '@core/services/authentication/errors/unauthenticated_error'
+import { UnauthorizedWorkspaceMemberOperationError } from '../../domain/errors/unauthorized-workspace-member-operation'
 
 /* ====================================================== */
 /*                        Types                           */
 /* ====================================================== */
 
 import type { Session } from '@core/services/authentication/session/session'
-import type { Id, Name } from '@core/modules/workspace/domain/workspace'
-import type { ModuleDependencies } from '../..'
+import type { WorkspaceId, WorkspaceMember } from '../../domain/workspace-member'
+import type { WorkspaceMemberRepository } from '../../infrastructure/repository'
 
-type CreateWorkspaceParameters = {
-	name: Name
-	ownerId: string
+export type GetWorkspaceMembersParameters = {
+	workspaceId: WorkspaceId
+}
+
+export type GetWorkspaceMembersDependencies = {
+	repository: WorkspaceMemberRepository
 }
 
 /* ====================================================== */
 /*                    Implementation                      */
 /* ====================================================== */
 
-async function createWorkspace(
-	{ name, ownerId }: CreateWorkspaceParameters,
-	dependencies: ModuleDependencies,
-) {
-	const workspaceId = dependencies.repository.generateId()
-	const now = new Date().getTime()
-
-	const workspace = await dependencies.repository.saveWorkspace({
-		id: workspaceId,
-		name,
-		userIds: [ownerId],
-		createdAt: now,
-		updatedAt: now,
-	})
-
-	// Add owner as workspace member
-	await dependencies.workspaceMemberRepository.addMember({
-		workspaceId,
-		userId: ownerId,
-		role: 'owner',
-		joinedAt: now,
-		updatedAt: now,
-	})
-
-	return workspace
+async function getWorkspaceMembers(
+	parameters: GetWorkspaceMembersParameters,
+	dependencies: GetWorkspaceMembersDependencies,
+): Promise<WorkspaceMember[]> {
+	return await dependencies.repository.getMembersByWorkspaceId(
+		parameters.workspaceId,
+	)
 }
 
 /* ====================================================== */
 /*                       Authorize                        */
 /* ====================================================== */
 
-function authorizeCreateWorkspace(
-	_parameters: CreateWorkspaceParameters,
-	_dependencies: ModuleDependencies,
+async function authorizeGetWorkspaceMembers(
+	parameters: GetWorkspaceMembersParameters,
+	dependencies: GetWorkspaceMembersDependencies,
 	session: Session,
 ) {
 	if (!session.isAuthenticated()) {
 		throw UnauthenticatedError.create()
+	}
+
+	// Verify requester is workspace member
+	const requesterId = session.getDistinctId()
+	const isMember = await dependencies.repository.isMember(
+		parameters.workspaceId,
+		requesterId!,
+	)
+
+	if (!isMember) {
+		throw UnauthorizedWorkspaceMemberOperationError.create()
 	}
 }
 
@@ -67,7 +64,6 @@ function authorizeCreateWorkspace(
 /* ====================================================== */
 
 export {
-	createWorkspace,
-	type CreateWorkspaceParameters,
-	authorizeCreateWorkspace,
+	getWorkspaceMembers,
+	authorizeGetWorkspaceMembers,
 }

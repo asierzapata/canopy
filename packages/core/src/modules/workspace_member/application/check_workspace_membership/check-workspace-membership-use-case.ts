@@ -9,52 +9,39 @@ import { UnauthenticatedError } from '@core/services/authentication/errors/unaut
 /* ====================================================== */
 
 import type { Session } from '@core/services/authentication/session/session'
-import type { Id, Name } from '@core/modules/workspace/domain/workspace'
-import type { ModuleDependencies } from '../..'
+import type { WorkspaceId, UserId } from '../../domain/workspace-member'
+import type { WorkspaceMemberRepository } from '../../infrastructure/repository'
 
-type CreateWorkspaceParameters = {
-	name: Name
-	ownerId: string
+export type CheckWorkspaceMembershipParameters = {
+	workspaceId: WorkspaceId
+	userId: UserId
+}
+
+export type CheckWorkspaceMembershipDependencies = {
+	repository: WorkspaceMemberRepository
 }
 
 /* ====================================================== */
 /*                    Implementation                      */
 /* ====================================================== */
 
-async function createWorkspace(
-	{ name, ownerId }: CreateWorkspaceParameters,
-	dependencies: ModuleDependencies,
-) {
-	const workspaceId = dependencies.repository.generateId()
-	const now = new Date().getTime()
-
-	const workspace = await dependencies.repository.saveWorkspace({
-		id: workspaceId,
-		name,
-		userIds: [ownerId],
-		createdAt: now,
-		updatedAt: now,
-	})
-
-	// Add owner as workspace member
-	await dependencies.workspaceMemberRepository.addMember({
-		workspaceId,
-		userId: ownerId,
-		role: 'owner',
-		joinedAt: now,
-		updatedAt: now,
-	})
-
-	return workspace
+async function checkWorkspaceMembership(
+	parameters: CheckWorkspaceMembershipParameters,
+	dependencies: CheckWorkspaceMembershipDependencies,
+): Promise<boolean> {
+	return await dependencies.repository.isMember(
+		parameters.workspaceId,
+		parameters.userId,
+	)
 }
 
 /* ====================================================== */
 /*                       Authorize                        */
 /* ====================================================== */
 
-function authorizeCreateWorkspace(
-	_parameters: CreateWorkspaceParameters,
-	_dependencies: ModuleDependencies,
+function authorizeCheckWorkspaceMembership(
+	_parameters: CheckWorkspaceMembershipParameters,
+	_dependencies: CheckWorkspaceMembershipDependencies,
 	session: Session,
 ) {
 	if (!session.isAuthenticated()) {
@@ -67,7 +54,6 @@ function authorizeCreateWorkspace(
 /* ====================================================== */
 
 export {
-	createWorkspace,
-	type CreateWorkspaceParameters,
-	authorizeCreateWorkspace,
+	checkWorkspaceMembership,
+	authorizeCheckWorkspaceMembership,
 }

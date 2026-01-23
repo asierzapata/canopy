@@ -19,12 +19,15 @@ import {
 
 import type { ModulesDependencies } from "@core/modules/shared/types";
 import type { WorkspaceRepository } from "./infrastructure/repository";
+import type { WorkspaceMemberRepository } from "@core/modules/workspace_member/infrastructure/repository";
 
 import { createMongoDBWorkspaceRepository } from "./infrastructure/repository/mongodb-workspace-repository";
+import { createMongoDBWorkspaceMemberRepository } from "@core/modules/workspace_member/infrastructure/repository/mongodb-workspace-member-repository";
 import { workspaceSchema } from "./domain/workspace";
 
 export type ModuleDependencies = {
 	repository: WorkspaceRepository;
+	workspaceMemberRepository: WorkspaceMemberRepository;
 };
 
 const handlers = (dependencies: ModulesDependencies) => {
@@ -63,6 +66,7 @@ const getModuleDependencies = ({
 }: ModulesDependencies): ModuleDependencies => {
 	return {
 		repository: createMongoDBWorkspaceRepository({ db: dataDb }),
+		workspaceMemberRepository: createMongoDBWorkspaceMemberRepository({ db: dataDb }),
 	};
 };
 
