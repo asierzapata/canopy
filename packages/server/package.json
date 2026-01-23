@@ -1,0 +1,24 @@
+{
+  "name": "@canopy/server",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "db:start": "docker-compose -f ./services/mongodb/mongodb.yml up -d"
+  },
+  "dependencies": {
+    "@canopy/core": "*",
+    "@hono/zod-validator": "^0.7.6",
+    "@t3-oss/env-core": "^0.13.10",
+    "date-fns": "^4.1.0",
+    "hono": "^4.11.5",
+    "mongodb": "^6.21.0",
+    "uuid": "^13.0.0",
+    "vitest": "^3.2.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "wrangler": "^4.4.0"
+  }
+}
