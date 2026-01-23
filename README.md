@@ -1,2 +1,1 @@
-# canopy
-top for coding agents
+# Canopy

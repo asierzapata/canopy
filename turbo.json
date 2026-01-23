@@ -1,0 +1,48 @@
+{
+	"$schema": "https://turborepo.org/schema.json",
+	"globalDependencies": ["**/.env"],
+	"globalEnv": ["CI", "NODE_ENV", "SKIP_ENV_VALIDATION"],
+	"tasks": {
+		"dev": {
+			"persistent": true,
+			"cache": false,
+			"env": [
+				"NODE_ENV",
+				"MONGODB_URI",
+				"AUTH_COOKIE_NAME",
+				"AUTH_COOKIE_DOMAIN",
+				"AUTH_JWT_SECRET",
+				"AUTH_JWT_EXPIRATION",
+				"AUHT_JWT_ALGORITHM",
+				"AUTH_JWT_KEY_ID"
+			]
+		},
+		"build": {
+			"dependsOn": ["^build"],
+			"outputs": [""],
+			"env": [
+				"NODE_ENV",
+				"MONGODB_URI",
+				"AUTH_COOKIE_NAME",
+				"AUTH_COOKIE_DOMAIN",
+				"AUTH_JWT_SECRET",
+				"AUTH_JWT_EXPIRATION",
+				"AUTH_JWT_ALGORITHM",
+				"AUTH_JWT_KEY_ID"
+			]
+		},
+		"lint": {},
+		"lint:fix": {},
+		"clean": {
+			"cache": false
+		},
+		"//#clean": {
+			"cache": false
+		},
+		"type-check": {},
+		"test": {
+			"interactive": false
+		}
+	},
+	"ui": "tui"
+}
