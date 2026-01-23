@@ -90,12 +90,30 @@ This module supports Canopy's **multiplayer collaboration** pillar by:
 
 ### Integration with Workspace Module
 
-The workspace module has been updated to automatically create workspace member records:
+**IMPORTANT:** The workspace module does NOT automatically create workspace_member records. This follows the module boundary rule - modules should not access other modules' repositories or use cases directly.
 
-1. **createWorkspace**: When a workspace is created, the owner is automatically added as a member with `role: 'owner'`
-2. **addUserToWorkspace**: When a user is added to a workspace, a member record is created with `role: 'member'`
+To maintain consistency between `workspace.userIds` and the `workspace_members` collection:
 
-This ensures consistency between the `workspace.userIds` array and the `workspace_members` collection.
+1. **At the application layer** (where both modules are available):
+   - After calling `workspace.createWorkspace()`, call `workspaceMember.addWorkspaceMember()` with `role: 'owner'`
+   - After calling `workspace.addUserToWorkspace()`, call `workspaceMember.addWorkspaceMember()` with `role: 'member'`
+
+2. **Example integration:**
+```typescript
+// In your application/API layer where you have access to modules
+const { workspaceId, ownerId } = await modules.workspace.createWorkspace(
+  { name: 'My Workspace', ownerId: userId },
+  session
+)
+
+// Create workspace member record
+await modules.workspaceMember.addWorkspaceMember(
+  { workspaceId, userId: ownerId, role: 'owner' },
+  session
+)
+```
+
+This separation preserves module boundaries and ensures authorization checks are always performed.
 
 ## Key Decisions
 
@@ -123,16 +141,17 @@ This ensures consistency between the `workspace.userIds` array and the `workspac
 
 **Future Path:** When granular permissions are needed, we can add a `permissions` field to WorkspaceMember without breaking existing role-based checks.
 
-### Synchronous Member Creation
+### Module Boundary Separation
 
-**Decision:** Create workspace member records synchronously during workspace creation and user addition.
+**Decision:** Workspace module does NOT create workspace_member records directly. Integration happens at the application layer.
 
 **Rationale:**
-- Ensures consistency between workspace.userIds and workspace_members collection
-- Simpler failure handling (transaction-like behavior)
-- Immediate consistency for authorization checks
+- Preserves module encapsulation (workspace shouldn't access workspace_member repositories)
+- Ensures authorization checks are always performed through use cases
+- Makes module dependencies explicit
+- Allows for more flexible integration patterns (events, sagas, etc.)
 
-**Trade-off:** Adds latency to workspace creation/user addition operations, but this is negligible for the small operations involved.
+**Trade-off:** Requires coordination at the application layer to maintain consistency between `workspace.userIds` and `workspace_members`. However, this is acceptable given the architectural benefits and clarity of responsibility.
 
 ### Authorization Pattern
 

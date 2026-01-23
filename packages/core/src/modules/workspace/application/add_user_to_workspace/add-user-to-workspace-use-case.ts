@@ -44,16 +44,6 @@ async function addUserToWorkspace(
 		parameters.workspaceId,
 		parameters.userId,
 	)
-
-	// Add workspace member record using workspace_member module
-	await dependencies.workspaceMember.addMember(
-		{
-			workspaceId: parameters.workspaceId,
-			userId: parameters.userId,
-			role: 'member',
-		},
-		dependencies.workspaceMember.dependencies,
-	)
 }
 
 /* ====================================================== */

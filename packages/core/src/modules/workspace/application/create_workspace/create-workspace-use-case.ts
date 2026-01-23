@@ -28,7 +28,7 @@ async function createWorkspace(
 	const workspaceId = dependencies.repository.generateId()
 	const now = new Date().getTime()
 
-	const workspace = await dependencies.repository.saveWorkspace({
+	await dependencies.repository.saveWorkspace({
 		id: workspaceId,
 		name,
 		userIds: [ownerId],
@@ -36,17 +36,8 @@ async function createWorkspace(
 		updatedAt: now,
 	})
 
-	// Add owner as workspace member using workspace_member module
-	await dependencies.workspaceMember.addMember(
-		{
-			workspaceId,
-			userId: ownerId,
-			role: 'owner',
-		},
-		dependencies.workspaceMember.dependencies,
-	)
-
-	return workspace
+	// Return workspace ID for caller to create workspace member record
+	return { workspaceId, ownerId }
 }
 
 /* ====================================================== */
