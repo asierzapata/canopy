@@ -65,3 +65,62 @@ await modules.workspaceMember.addWorkspaceMember(params, session)
 - Makes dependencies between modules explicit and traceable
 
 **Note:** Within a single module, repositories are accessed directly by use cases. This rule only applies to cross-module interactions.
+
+### Idempotency
+
+**CRITICAL: Use cases should be idempotent whenever possible.**
+
+Idempotent operations can be called multiple times with the same parameters and produce the same result, making them safe for retries and improving system reliability.
+
+**Guidelines:**
+
+- **Create/Add operations**: If the resource already exists with the same properties, succeed without error
+  - If properties differ, update to match the requested state
+- **Delete/Remove operations**: If the resource doesn't exist, succeed without error (desired state achieved)
+- **Update operations**: Apply the changes; repeated calls with same data should succeed
+- **Read operations**: Naturally idempotent
+
+**Examples:**
+```typescript
+// ✅ GOOD - Idempotent add operation
+async function addWorkspaceMember(params, deps) {
+  const existing = await deps.repository.getMember(params.workspaceId, params.userId)
+
+  if (existing) {
+    // Same role? Succeed silently
+    if (existing.role === params.role) return
+    // Different role? Update it
+    await deps.repository.updateMemberRole(params.workspaceId, params.userId, params.role)
+    return
+  }
+
+  await deps.repository.addMember({...params, joinedAt: Date.now(), updatedAt: Date.now()})
+}
+
+// ✅ GOOD - Idempotent remove operation
+async function removeWorkspaceMember(params, deps) {
+  const member = await deps.repository.getMember(params.workspaceId, params.userId)
+
+  // Already removed? Succeed (desired state achieved)
+  if (!member) return
+
+  await deps.repository.removeMember(params.workspaceId, params.userId)
+}
+
+// ❌ BAD - Not idempotent (throws error on duplicate)
+async function addWorkspaceMember(params, deps) {
+  const existing = await deps.repository.getMember(params.workspaceId, params.userId)
+  if (existing) {
+    throw WorkspaceMemberAlreadyExistsError.create() // Forces caller to handle retries
+  }
+  await deps.repository.addMember(params)
+}
+```
+
+**Rationale:**
+- Safe retries in case of network failures or timeouts
+- Simplifies client code (no need to handle "already exists" errors)
+- Better resilience in distributed systems
+- Follows HTTP semantic conventions (PUT is idempotent)
+
+**Exceptions:** Some operations are inherently non-idempotent (e.g., generating unique IDs, incrementing counters). Document these clearly.

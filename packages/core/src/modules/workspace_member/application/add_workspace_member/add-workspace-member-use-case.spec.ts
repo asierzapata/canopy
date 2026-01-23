@@ -10,7 +10,6 @@ import {
 } from './add-workspace-member-use-case'
 import { createMongoDBWorkspaceMemberRepository } from '../../infrastructure/repository/mongodb-workspace-member-repository'
 import { UnauthenticatedError } from '@core/services/authentication/errors/unauthenticated_error'
-import { WorkspaceMemberAlreadyExistsError } from '../../domain/errors/workspace-member-already-exists'
 import { UnauthorizedWorkspaceMemberOperationError } from '../../domain/errors/unauthorized-workspace-member-operation'
 import { Session } from '@core/services/authentication/session/session'
 import { SessionAuthorizationStatus } from '@core/services/authentication/session/session_authorization_status'
@@ -61,12 +60,30 @@ describe('Use Case | Add Workspace Member', () => {
 			expect(member?.role).toBe('member')
 		})
 
-		test('should throw WorkspaceMemberAlreadyExistsError for duplicate member', async () => {
+		test('should be idempotent when adding same member with same role', async () => {
 			await addWorkspaceMember(parameters, dependencies)
 
-			await expect(addWorkspaceMember(parameters, dependencies)).rejects.toThrow(
-				WorkspaceMemberAlreadyExistsError,
-			)
+			// Should succeed when called again with same parameters
+			await expect(addWorkspaceMember(parameters, dependencies)).resolves.not.toThrow()
+
+			// Member should still exist with same role
+			const member = await dependencies.repository.getMember(workspaceId, userId)
+			expect(member?.role).toBe('member')
+		})
+
+		test('should update role when adding existing member with different role', async () => {
+			// Add as member
+			await addWorkspaceMember(parameters, dependencies)
+
+			// Add again as owner
+			await addWorkspaceMember({
+				...parameters,
+				role: 'owner',
+			}, dependencies)
+
+			// Role should be updated
+			const member = await dependencies.repository.getMember(workspaceId, userId)
+			expect(member?.role).toBe('owner')
 		})
 
 		test('should add member with owner role', async () => {

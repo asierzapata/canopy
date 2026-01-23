@@ -3,7 +3,6 @@
 /* ====================================================== */
 
 import { UnauthenticatedError } from '@core/services/authentication/errors/unauthenticated_error'
-import { WorkspaceMemberNotFoundError } from '../../domain/errors/workspace-member-not-found'
 import { UnauthorizedWorkspaceMemberOperationError } from '../../domain/errors/unauthorized-workspace-member-operation'
 
 /* ====================================================== */
@@ -37,8 +36,9 @@ async function removeWorkspaceMember(
 		parameters.userId,
 	)
 
+	// Idempotent: If member doesn't exist, succeed (desired state achieved)
 	if (!member) {
-		throw WorkspaceMemberNotFoundError.create()
+		return
 	}
 
 	// Remove member

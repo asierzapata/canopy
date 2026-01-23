@@ -10,7 +10,6 @@ import {
 } from './remove-workspace-member-use-case'
 import { createMongoDBWorkspaceMemberRepository } from '../../infrastructure/repository/mongodb-workspace-member-repository'
 import { UnauthenticatedError } from '@core/services/authentication/errors/unauthenticated_error'
-import { WorkspaceMemberNotFoundError } from '../../domain/errors/workspace-member-not-found'
 import { UnauthorizedWorkspaceMemberOperationError } from '../../domain/errors/unauthorized-workspace-member-operation'
 import { Session } from '@core/services/authentication/session/session'
 import { SessionAuthorizationStatus } from '@core/services/authentication/session/session_authorization_status'
@@ -66,15 +65,30 @@ describe('Use Case | Remove Workspace Member', () => {
 			expect(member).toBeNull()
 		})
 
-		test('should throw WorkspaceMemberNotFoundError for non-existent member', async () => {
+		test('should be idempotent when removing non-existent member', async () => {
 			const nonExistentParameters = {
 				workspaceId,
 				userId: uuid(),
 			}
 
+			// Should succeed even if member doesn't exist
 			await expect(
 				removeWorkspaceMember(nonExistentParameters, dependencies),
-			).rejects.toThrow(WorkspaceMemberNotFoundError)
+			).resolves.not.toThrow()
+		})
+
+		test('should be idempotent when called multiple times', async () => {
+			// Remove member once
+			await removeWorkspaceMember(parameters, dependencies)
+
+			// Remove again - should succeed
+			await expect(
+				removeWorkspaceMember(parameters, dependencies),
+			).resolves.not.toThrow()
+
+			// Member should still be gone
+			const member = await dependencies.repository.getMember(workspaceId, userId)
+			expect(member).toBeNull()
 		})
 	})
 

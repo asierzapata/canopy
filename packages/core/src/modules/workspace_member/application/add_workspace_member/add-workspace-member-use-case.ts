@@ -3,7 +3,6 @@
 /* ====================================================== */
 
 import { UnauthenticatedError } from '@core/services/authentication/errors/unauthenticated_error'
-import { WorkspaceMemberAlreadyExistsError } from '../../domain/errors/workspace-member-already-exists'
 import { UnauthorizedWorkspaceMemberOperationError } from '../../domain/errors/unauthorized-workspace-member-operation'
 
 /* ====================================================== */
@@ -39,7 +38,17 @@ async function addWorkspaceMember(
 	)
 
 	if (existingMember) {
-		throw WorkspaceMemberAlreadyExistsError.create()
+		// Idempotent: If member exists with same role, succeed
+		if (existingMember.role === parameters.role) {
+			return
+		}
+		// If role is different, update it
+		await dependencies.repository.updateMemberRole(
+			parameters.workspaceId,
+			parameters.userId,
+			parameters.role,
+		)
+		return
 	}
 
 	// Add member with timestamps
