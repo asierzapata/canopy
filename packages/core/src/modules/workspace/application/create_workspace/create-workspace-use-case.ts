@@ -36,14 +36,15 @@ async function createWorkspace(
 		updatedAt: now,
 	})
 
-	// Add owner as workspace member
-	await dependencies.workspaceMemberRepository.addMember({
-		workspaceId,
-		userId: ownerId,
-		role: 'owner',
-		joinedAt: now,
-		updatedAt: now,
-	})
+	// Add owner as workspace member using workspace_member module
+	await dependencies.workspaceMember.addMember(
+		{
+			workspaceId,
+			userId: ownerId,
+			role: 'owner',
+		},
+		dependencies.workspaceMember.dependencies,
+	)
 
 	return workspace
 }

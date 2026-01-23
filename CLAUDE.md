@@ -38,3 +38,30 @@ yarn clean:workspaces # Clean all workspace build artifacts
 ## Documentation
 
 There is a folder named `documentation/` at the root of the repo that contains markdown files with high-level overviews of the architecture and design decisions for different parts of the project. These documents are intended to help you understand the system quickly.
+
+## Architecture Rules
+
+### Module Boundaries
+
+**CRITICAL: Never access repositories of other modules directly.**
+
+When one module needs to interact with another module's data:
+- ❌ **WRONG**: `dependencies.otherModuleRepository.method()`
+- ✅ **CORRECT**: Call the other module's use cases through the modules API
+
+**Example:**
+```typescript
+// ❌ BAD - Direct repository access across modules
+await dependencies.workspaceMemberRepository.addMember({...})
+
+// ✅ GOOD - Use the module's public API
+await modules.workspaceMember.addWorkspaceMember(params, session)
+```
+
+**Rationale:**
+- Preserves module encapsulation and boundaries
+- Ensures authorization checks are always performed
+- Prevents bypassing business logic in use cases
+- Makes dependencies between modules explicit and traceable
+
+**Note:** Within a single module, repositories are accessed directly by use cases. This rule only applies to cross-module interactions.
